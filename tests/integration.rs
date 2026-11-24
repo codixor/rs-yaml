@@ -92,3 +92,11 @@ fn parallel_parser_preserves_stream_order() {
         fast::Parser::parse_all(input).unwrap()
     );
 }
+
+#[test]
+fn block_scalar_header_comments_have_source_byte_ranges() {
+    let yaml = "label: >- # première\r\n  literal # content\r\nnext: 1 # last\r\n";
+    let ranges = rs_yaml::find_comments(yaml, rs_yaml::MaxScanAhead::DEFAULT).unwrap();
+    let comments: Vec<_> = ranges.into_iter().map(|range| &yaml[range]).collect();
+    assert_eq!(comments, ["# première", "# last"]);
+}

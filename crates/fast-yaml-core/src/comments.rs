@@ -166,7 +166,14 @@ impl CommentScanner {
                 self.cursor = match style {
                     ScalarStyle::SingleQuoted => skip_quoted(&self.chars, start, '\''),
                     ScalarStyle::DoubleQuoted => skip_quoted(&self.chars, start, '"'),
-                    _ => end,
+                    ScalarStyle::Literal | ScalarStyle::Folded => {
+                        // Saphyr 0.4 includes the indicator line in a block scalar's span.
+                        // Only the header can contain a comment; the body is scalar text.
+                        let header_end = line_end(&self.chars, start.min(self.chars.len()));
+                        self.scan_gap(start, header_end.min(end));
+                        end
+                    }
+                    ScalarStyle::Plain => end,
                 };
             }
         }

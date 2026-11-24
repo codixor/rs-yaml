@@ -664,7 +664,14 @@ impl ScalarRanges {
                             .is_none_or(|last| last.end() <= range.start()),
                         "block scalar ranges must be sorted and disjoint"
                     );
-                    self.block.push(range);
+                    // The 0.4 span starts at the block indicator. Keep the header
+                    // available to the linter, and mask tokens only in the scalar body.
+                    let content = source
+                        .get(range.start().get()..range.end().get())
+                        .and_then(|text| text.split_once(['\r', '\n']))
+                        .map_or("", |(_, rest)| rest.trim_start_matches([' ', '\r', '\n']));
+                    let start = ByteOffset::new(range.end().get() - content.len());
+                    self.block.push(ByteRange::new(start, range.end()));
                 }
                 ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted => {
                     self.quoted.push(range);

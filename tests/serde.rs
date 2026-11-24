@@ -88,3 +88,89 @@ fn unix_file_mode_spelling_for_u32() {
         assert_eq!(from_str::<Config>(yaml).unwrap().mode, 0o600);
     }
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct Strict {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    level: Option<Level>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+enum Level {
+    Low,
+    High,
+}
+
+#[test]
+fn booleans_are_true_or_false_only() {
+    for yaml in ["enabled: true", "enabled: false"] {
+        assert!(from_str::<Strict>(yaml).unwrap().enabled.is_some());
+    }
+    for yaml in [
+        "enabled: yes",
+        "enabled: on",
+        "enabled: no",
+        "enabled: off",
+        "enabled: y",
+    ] {
+        let error = from_str::<Strict>(yaml).unwrap_err().to_string();
+        assert!(error.contains("invalid boolean"), "{yaml}: {error}");
+    }
+}
+
+#[test]
+fn tags_outside_the_core_schema_are_refused() {
+    for yaml in [
+        "name: !vault private-fixture-marker",
+        "name: !<tag:x.io,2026:t> v",
+        "level: !Low",
+    ] {
+        let error = from_str::<Strict>(yaml).unwrap_err().to_string();
+        assert!(error.contains("unsupported YAML tag"), "{yaml}: {error}");
+        assert!(
+            !error.contains("vault") && !error.contains("x.io"),
+            "{error}"
+        );
+    }
+    assert_eq!(
+        from_str::<Strict>("name: !!str 123")
+            .unwrap()
+            .name
+            .as_deref(),
+        Some("123")
+    );
+}
+
+#[test]
+fn serde_errors_name_the_setting_but_never_the_value() {
+    let cases = [
+        (
+            "tokne: private-fixture-marker",
+            "unknown field `tokne`, expected one of",
+        ),
+        ("port: private-fixture-marker", "invalid value for u16"),
+        ("port: 70000", "u16"),
+        (
+            "level: private-fixture-marker",
+            "unknown variant, expected one of `Low`, `High`",
+        ),
+    ];
+    for (yaml, wanted) in cases {
+        let error = from_str::<Strict>(yaml).unwrap_err();
+        let text = format!("{error} {error:?}");
+        assert!(text.contains(wanted), "{yaml}: {text}");
+        assert!(
+            !text.contains("private-fixture-marker") && !text.contains("70000"),
+            "{text}"
+        );
+    }
+}

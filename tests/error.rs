@@ -83,3 +83,15 @@ fn upstream_alias_budget_is_reported_as_a_limit() {
     }
     panic!("the configured alias budget should be reached");
 }
+
+#[test]
+fn core_tag_errors_show_the_written_spelling() {
+    let error = rs_yaml::safe_load("token: !!int private-fixture-marker")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("!!int") && !error.contains("tag:yaml.org"),
+        "{error}"
+    );
+    assert!(!error.contains("private-fixture-marker"), "{error}");
+}

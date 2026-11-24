@@ -429,8 +429,11 @@ fn value_kind(value: &Value) -> &'static str {
 
 fn invalid_tag(tag: &Tag) -> ParseError {
     match tag.suffix.as_str() {
-        "bool" | "int" | "float" | "null" | "str" | "seq" | "map" => {
-            invalid_tag_name(&tag.to_string())
+        // saphyr's `Display` gives `tag:yaml.org,2002:!int`; show the spelling the user wrote.
+        suffix @ ("bool" | "int" | "float" | "null" | "str" | "seq" | "map")
+            if tag.is_yaml_core_schema() =>
+        {
+            invalid_tag_name(&format!("!!{suffix}"))
         }
         _ => invalid_tag_name("[unrecognized]"),
     }

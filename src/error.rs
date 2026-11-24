@@ -11,6 +11,13 @@ pub enum ParseError {
     #[error("unexpected second YAML document at line {line}, column {column}")]
     MultipleDocuments { line: usize, column: usize },
 
+    /// A typed loader met a tag outside the YAML core schema (`!!str`, `!!int`, ...).
+    /// The tag is not quoted: it is input text.
+    #[error(
+        "unsupported YAML tag at line {line}, column {column}: only core schema tags are accepted"
+    )]
+    UnsupportedTag { line: usize, column: usize },
+
     /// Serde could not construct the requested type.
     #[cfg(feature = "serde")]
     #[error("cannot deserialize YAML into the requested type")]

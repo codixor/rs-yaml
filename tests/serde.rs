@@ -112,8 +112,16 @@ enum Level {
 
 #[test]
 fn booleans_are_true_or_false_only() {
-    for yaml in ["enabled: true", "enabled: false"] {
-        assert!(from_str::<Strict>(yaml).unwrap().enabled.is_some());
+    for (spelling, expected) in [
+        ("true", true),
+        ("True", true),
+        ("TRUE", true),
+        ("false", false),
+        ("False", false),
+        ("FALSE", false),
+    ] {
+        let yaml = format!("enabled: {spelling}");
+        assert_eq!(from_str::<Strict>(&yaml).unwrap().enabled, Some(expected));
     }
     for yaml in [
         "enabled: yes",
@@ -173,4 +181,58 @@ fn serde_errors_name_the_setting_but_never_the_value() {
             "{text}"
         );
     }
+}
+
+#[test]
+fn typed_tags_check_the_complete_uri() {
+    for yaml in ["!!timestamp today", "!!set {}", "!!noncore []"] {
+        assert!(
+            matches!(
+                from_str::<serde::de::IgnoredAny>(yaml),
+                Err(rs_yaml::ParseError::UnsupportedTag { .. })
+            ),
+            "{yaml}"
+        );
+    }
+    assert_eq!(
+        from_str::<String>("!<tag:yaml.org,2002:str> 123").unwrap(),
+        "123"
+    );
+}
+
+#[test]
+fn serde_expected_messages_cannot_disclose_values() {
+    #[derive(Debug, Deserialize)]
+    struct Port {
+        #[allow(dead_code)]
+        #[serde(deserialize_with = "port")]
+        port: u16,
+    }
+    fn port<'de, D: serde::Deserializer<'de>>(de: D) -> Result<u16, D::Error> {
+        let text = String::deserialize(de)?;
+        Err(serde::de::Error::invalid_value(
+            serde::de::Unexpected::Str(&text),
+            &text.as_str(),
+        ))
+    }
+    let error = from_str::<Port>("port: private-fixture-marker").unwrap_err();
+    assert!(!format!("{error} {error:?}").contains("private-fixture-marker"));
+}
+
+#[test]
+fn unknown_field_messages_only_quote_mapping_keys() {
+    #[derive(Debug, Deserialize)]
+    struct Config {
+        #[allow(dead_code)]
+        #[serde(deserialize_with = "read_option")]
+        option: String,
+    }
+    fn read_option<'de, D: serde::Deserializer<'de>>(de: D) -> Result<String, D::Error> {
+        let value = String::deserialize(de)?;
+        Err(serde::de::Error::unknown_field(&value, &["one", "two"]))
+    }
+    let error = from_str::<Config>("option: private-fixture-marker").unwrap_err();
+    let text = format!("{error} {error:?}");
+    assert!(text.contains("unknown field"));
+    assert!(!text.contains("private-fixture-marker"));
 }

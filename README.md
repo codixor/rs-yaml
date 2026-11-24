@@ -4,7 +4,7 @@ A Rust 1.100 library for parsing, emitting, formatting and linting YAML. The com
 
 ```toml
 [dependencies]
-rs-yaml = "0.3.0"
+rs-yaml = "0.4.0"
 ```
 
 ```rust
@@ -51,11 +51,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 For a Serde `u32` file mode, write `mode: 0o600` (octal) or `mode: 384` (decimal). The typed loader rejects the legacy spelling `mode: 0600`.
 
-The typed loader is strict about two YAML 1.1 habits. A `bool` field accepts only `true` and `false` (also `True`/`TRUE`/`False`/`FALSE`); `yes`, `no`, `on` and `off` are errors, not booleans. Tags outside the core schema (`!vault`, `!<tag:…>`, enum tags such as `!Low`) are refused instead of being dropped; core tags such as `!!str` still work. Its errors name the field and the expected type ("unknown field `tokne`", `invalid value for u16`), never the value, the unknown variant or a custom `deserialize_with` message.
+For a boolean field, use `true` or `false`. The loader also accepts their title-case and uppercase forms. It rejects YAML 1.1 spellings such as `yes` and `on`. Explicit tags must resolve to one of the seven YAML core tags, such as `!!str`. Local tags such as `!vault` and enum tags such as `!Low` return `ParseError::UnsupportedTag` with a source location.
+
+An unknown-field error can name the misspelled mapping key and list the allowed fields. A type error can identify the expected type, such as `u16`. Input values, unknown variant names and custom visitor messages are omitted.
 
 ## Handling input
 
-`safe_load`, `Parser::parse_str`, `Parser::parse_marked_str` and typed `from_str` reject a second document, including an empty one. Use `safe_load_all` or `Parser::parse_all_marked` to read a stream. Each mapping must have unique keys. Quoting a string key, changing an integer's spelling, or referring to a key by alias does not make it distinct. An explicit key may override one inherited through a merge. Duplicate-key errors give both source positions. Parsing and Serde errors omit input values and custom Serde messages so they can be logged without quoting configuration values; like rs-toml, an unknown-field error does name the key.
+`safe_load`, `Parser::parse_str`, `Parser::parse_marked_str` and typed `from_str` reject a second document, including an empty one. Use `safe_load_all` or `Parser::parse_all_marked` to read a stream. Each mapping must have unique keys. Quoting a string key, changing an integer's spelling, or referring to a key by alias does not make it distinct. An explicit key may override one inherited through a merge. Duplicate-key errors give both source positions. Compatibility parser errors give locations and redact input text.
 
 The typed adapter uses serde-saphyr after the compatibility checks. The `fast`, `lint` and `parallel` re-exports retain their own parsing and diagnostic policies.
 

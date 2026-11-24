@@ -1,12 +1,12 @@
 use crate::load_guard::{self, Documents};
 use crate::{EmitError, EmitResult, ParseError, ParseResult};
-use saphyr_parser::{Event, Tag};
+use saphyr_parser::{BufferedInput, Event, Parser, Tag};
 use serde_core::{Deserialize, Serialize};
 use serde_saphyr::Error as DeError;
 
 /// Deserialize one YAML document. Duplicate keys, a second document and tags outside
 /// the core schema are errors; booleans are `true`/`false` only (no `yes`/`on`).
-/// Diagnostics name fields and expected types from the program, never input values.
+/// Diagnostics can name an unknown mapping key and expected types. Input values are redacted.
 pub fn from_str<'de, T: Deserialize<'de>>(input: &'de str) -> ParseResult<T> {
     load_guard::load(input, Documents::Single, |event, span| {
         let tag = match &event {
@@ -15,7 +15,7 @@ pub fn from_str<'de, T: Deserialize<'de>>(input: &'de str) -> ParseResult<T> {
             | Event::SequenceStart(_, tag) => tag.as_deref(),
             _ => None,
         };
-        if tag.is_some_and(|tag: &Tag| !tag.is_yaml_core_schema()) {
+        if tag.is_some_and(|tag| !is_core_tag(tag)) {
             return Err(ParseError::UnsupportedTag {
                 line: span.start.line(),
                 column: span.start.col() + 1,
@@ -28,7 +28,7 @@ pub fn from_str<'de, T: Deserialize<'de>>(input: &'de str) -> ParseResult<T> {
         strict_booleans: true,
     };
     serde_saphyr::from_str_with_options(input, options).map_err(|error| {
-        let message = describe(&error);
+        let message = describe(&error, input);
         match error.location() {
             Some(location) => ParseError::Syntax {
                 line: location.line() as usize,
@@ -40,16 +40,64 @@ pub fn from_str<'de, T: Deserialize<'de>>(input: &'de str) -> ParseResult<T> {
     })
 }
 
-/// A diagnostic built only from program-side text: field names, expected types and
-/// fixed reasons. Unexpected values, unknown variants and custom messages are dropped,
-/// since a `deserialize_with` function may format the value it rejected.
-fn describe(error: &DeError) -> String {
+// A %TAG directive or verbatim spelling can split the same URI at a different point.
+fn is_core_tag(tag: &Tag) -> bool {
+    [
+        "tag:yaml.org,2002:null",
+        "tag:yaml.org,2002:bool",
+        "tag:yaml.org,2002:int",
+        "tag:yaml.org,2002:float",
+        "tag:yaml.org,2002:str",
+        "tag:yaml.org,2002:seq",
+        "tag:yaml.org,2002:map",
+    ]
+    .iter()
+    .any(|uri| uri.strip_prefix(&tag.handle) == Some(tag.suffix.as_str()))
+}
+
+/// A custom visitor can use a rejected scalar as the field argument to
+/// unknown_field. Only quote names observed as scalar keys in the validated input.
+fn contains_field(input: &str, field: &str) -> bool {
+    let mut parents = Vec::new();
+    for item in Parser::new(BufferedInput::new(input.chars())) {
+        let Ok((event, _)) = item else { return false };
+        let collection = match &event {
+            Event::MappingEnd | Event::SequenceEnd => {
+                parents.pop();
+                continue;
+            }
+            Event::MappingStart(..) => Some(Some(true)),
+            Event::SequenceStart(..) => Some(None),
+            Event::Scalar(..) | Event::Alias(_) => None,
+            _ => continue,
+        };
+        if let Some(Some(next_is_key)) = parents.last_mut() {
+            if *next_is_key && matches!(event, Event::Scalar(ref text, ..) if text == field) {
+                return true;
+            }
+            *next_is_key = !*next_is_key;
+        }
+        if let Some(parent) = collection {
+            parents.push(parent);
+        }
+    }
+    false
+}
+
+fn describe(error: &DeError, input: &str) -> String {
     match error {
         DeError::SerdeUnknownField {
             field, expected, ..
         } => {
-            // Keys are quoted, as rs-toml does: they name the setting the user misspelled.
-            format!("unknown field `{field}`, expected {}", one_of(expected))
+            if contains_field(input, field) {
+                format!(
+                    "unknown field `{}`, expected {}",
+                    field.escape_debug(),
+                    one_of(expected)
+                )
+            } else {
+                format!("unknown field, expected {}", one_of(expected))
+            }
         }
         DeError::SerdeMissingField { field, .. } => format!("missing field `{field}`"),
         DeError::SerdeInvalidType {
@@ -58,8 +106,9 @@ fn describe(error: &DeError) -> String {
             ..
         } => {
             format!(
-                "invalid type: found {}, expected {expected}",
-                kind(unexpected)
+                "invalid type: found {}, expected {}",
+                kind(unexpected),
+                expected_type(expected)
             )
         }
         DeError::SerdeInvalidValue {
@@ -68,12 +117,13 @@ fn describe(error: &DeError) -> String {
             ..
         } => {
             format!(
-                "invalid value: found {}, expected {expected}",
-                kind(unexpected)
+                "invalid value: found {}, expected {}",
+                kind(unexpected),
+                expected_type(expected)
             )
         }
         DeError::SerdeInvalidLength { len, expected, .. } => {
-            format!("invalid length {len}, expected {expected}")
+            format!("invalid length {len}, expected {}", expected_type(expected))
         }
         DeError::SerdeUnknownVariant { expected, .. } => {
             format!("unknown variant, expected {}", one_of(expected))
@@ -85,6 +135,16 @@ fn describe(error: &DeError) -> String {
         DeError::Unexpected { expected, .. } => format!("expected {expected}"),
         DeError::Budget { .. } => "YAML resource limit exceeded".into(),
         _ => "cannot deserialize YAML into the requested type".into(),
+    }
+}
+
+// Serde's Expected formatter can be implemented by the caller and can include input.
+fn expected_type(description: &str) -> &str {
+    match description {
+        "bool" | "a boolean" | "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16"
+        | "u32" | "u64" | "u128" | "usize" | "f32" | "f64" | "a string" | "a borrowed string"
+        | "a character" | "a sequence" | "a map" | "unit" | "option" => description,
+        _ => "the requested type",
     }
 }
 

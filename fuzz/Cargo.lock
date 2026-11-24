@@ -94,7 +94,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "codixor-fast-yaml-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "bumpalo",
  "indexmap",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "codixor-fast-yaml-linter"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "codixor-fast-yaml-core",
  "ignore",
@@ -413,7 +413,7 @@ checksum = "d902046e6a28a1e4c3cab97258a0ce11e994903f01c2d97a9447a0b3df85f4f6"
 
 [[package]]
 name = "rs-yaml"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "codixor-fast-yaml-core",
  "codixor-fast-yaml-linter",

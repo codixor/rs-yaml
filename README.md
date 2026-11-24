@@ -4,7 +4,7 @@ A Rust 1.100 library for parsing, emitting, formatting and linting YAML. The com
 
 ```toml
 [dependencies]
-rs-yaml = "0.1.1"
+rs-yaml = "0.2.0"
 ```
 
 ```rust
@@ -30,7 +30,7 @@ The default `streaming` feature formats parser events directly. Enable `arena` f
 
 ## Typed configurations
 
-On this branch, enable the `serde` feature on `rs-yaml` and the `derive` feature on `serde` to use derived Rust types.
+Enable the `serde` feature on `rs-yaml` and the `derive` feature on `serde` to use derived Rust types.
 
 ```rust
 use serde::{Deserialize, Serialize};

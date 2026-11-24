@@ -7,6 +7,15 @@ pub enum ParseError {
     #[error("YAML resource limit exceeded: {0}")]
     ResourceLimit(&'static str),
 
+    /// A single-document API encountered a second document.
+    #[error("unexpected second YAML document at line {line}, column {column}")]
+    MultipleDocuments { line: usize, column: usize },
+
+    /// Serde could not construct the requested type.
+    #[cfg(feature = "serde")]
+    #[error("cannot deserialize YAML into the requested type")]
+    Deserialize,
+
     /// The alias refers to an unknown or still-open anchor.
     #[error("YAML alias must refer to a completed anchor in this document")]
     UnresolvedAlias,
@@ -23,7 +32,7 @@ pub enum ParseError {
     },
 
     /// Invalid float value encountered.
-    #[error("invalid float value '{value}': {source}")]
+    #[error("invalid YAML float: {source}")]
     InvalidFloat {
         /// The invalid float value string.
         value: String,
@@ -34,14 +43,14 @@ pub enum ParseError {
 
     /// YAML scanner error from saphyr.
     #[error("YAML scanner error: {0}")]
-    Scanner(#[from] saphyr::ScanError),
+    Scanner(#[source] saphyr::ScanError),
 
     /// Explicit tag coercion failed.
-    #[error("invalid explicit YAML tag {tag} for value {value}")]
+    #[error("invalid value for explicit YAML tag {tag}")]
     InvalidTaggedValue {
         /// The explicit tag that failed.
         tag: String,
-        /// The scalar representation that could not be coerced.
+        /// Redacted placeholder. Input values are never retained here.
         value: String,
     },
 
@@ -54,10 +63,10 @@ pub enum ParseError {
 
     /// Duplicate mapping key detected.
     #[error(
-        "duplicate YAML mapping key '{key}' first defined at line {first_line}, column {first_column}, duplicated at line {duplicate_line}, column {duplicate_column}"
+        "duplicate YAML mapping key first defined at line {first_line}, column {first_column}, duplicated at line {duplicate_line}, column {duplicate_column}"
     )]
     DuplicateKey {
-        /// Duplicate key text.
+        /// Redacted placeholder. Input keys are never retained here.
         key: String,
         /// First key line.
         first_line: usize,
@@ -68,6 +77,15 @@ pub enum ParseError {
         /// Duplicate key column.
         duplicate_column: usize,
     },
+}
+
+impl From<saphyr::ScanError> for ParseError {
+    fn from(error: saphyr::ScanError) -> Self {
+        Self::Scanner(saphyr::ScanError::new_str(
+            *error.marker(),
+            "invalid YAML syntax",
+        ))
+    }
 }
 
 /// Errors that can occur during YAML emission.

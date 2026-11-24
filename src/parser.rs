@@ -1,9 +1,10 @@
-use std::{borrow::Cow, collections::BTreeMap};
+use std::borrow::Cow;
 
 use crate::error::{ParseError, ParseResult};
+use crate::load_guard::Documents;
 use crate::value::{MarkedValue, Value, YamlDataOwned};
 use saphyr::{LoadableYamlNode, MappingOwned, ScalarOwned, Tag, YamlLoader, parse_core_schema_fp};
-use saphyr_parser::{Event, Span, SpannedEventReceiver};
+use saphyr_parser::SpannedEventReceiver;
 
 /// Parser for YAML documents.
 ///
@@ -14,7 +15,7 @@ pub struct Parser;
 impl Parser {
     /// Parse a single YAML document from a string.
     ///
-    /// Returns the first document if multiple are present.
+    /// Returns an error at the start of a second document.
     ///
     /// Truly empty input and comment-only input are treated as valid YAML null
     /// documents and return a YAML null scalar value.
@@ -37,10 +38,9 @@ impl Parser {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn parse_str(input: &str) -> ParseResult<Value> {
-        Ok(Self::parse_all(input)?
-            .into_iter()
-            .next()
-            .unwrap_or(Value::Value(ScalarOwned::Null)))
+        let mut docs = load_documents_preserving_styles(input, Documents::Single)?;
+        docs.pop()
+            .map_or(Ok(Value::Value(ScalarOwned::Null)), normalize_value)
     }
 
     /// Parse all YAML documents from a string.
@@ -62,28 +62,24 @@ impl Parser {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn parse_all(input: &str) -> ParseResult<Vec<Value>> {
-        load_documents_preserving_styles(input)?
+        load_documents_preserving_styles(input, Documents::Stream)?
             .into_iter()
             .map(normalize_value)
             .collect()
     }
 
-    /// Validates that mappings do not contain duplicate scalar keys.
-    ///
-    /// This is an explicit validation pass because the normal YAML value tree is
-    /// key-indexed and cannot represent duplicate keys after loading.
+    /// Check every mapping in a stream for duplicate keys using the same rules as the loaders.
     ///
     /// # Errors
     ///
-    /// Returns [`ParseError::DuplicateKey`] with the first and duplicate key
-    /// positions when a duplicate scalar mapping key is detected.
+    /// Returns a parse error on invalid input. Duplicate keys report both source positions.
     pub fn validate_no_duplicate_mapping_keys(input: &str) -> ParseResult<()> {
-        reject_duplicate_mapping_keys(input)
+        crate::load_guard::validate(input, Documents::Stream)
     }
 
     /// Parse a single YAML document while preserving source spans.
     ///
-    /// Returns the first document if multiple are present. Truly empty input
+    /// Returns an error at the start of a second document. Truly empty input
     /// and comment-only input are treated as valid YAML null documents.
     ///
     /// This API intentionally returns the marked parser tree rather than the
@@ -94,9 +90,8 @@ impl Parser {
     ///
     /// Returns [`ParseError`] if the YAML syntax is invalid.
     pub fn parse_marked_str(input: &str) -> ParseResult<MarkedValue> {
-        Ok(Self::parse_all_marked(input)?
-            .into_iter()
-            .next()
+        Ok(load_documents_preserving_styles(input, Documents::Single)?
+            .pop()
             .unwrap_or_else(|| MarkedValue::from(YamlDataOwned::Value(ScalarOwned::Null))))
     }
 
@@ -110,7 +105,7 @@ impl Parser {
     ///
     /// Returns [`ParseError`] if the YAML syntax is invalid.
     pub fn parse_all_marked(input: &str) -> ParseResult<Vec<MarkedValue>> {
-        load_documents_preserving_styles(input)
+        load_documents_preserving_styles(input, Documents::Stream)
     }
 
     /// Parse all YAML documents preserving scalar styles (literal `|`, folded `>`).
@@ -127,7 +122,7 @@ impl Parser {
     ///
     /// [`parse_all`]: Parser::parse_all
     pub fn parse_all_preserving_styles(input: &str) -> ParseResult<Vec<Value>> {
-        load_documents_preserving_styles(input)
+        load_documents_preserving_styles(input, Documents::Stream)
     }
 }
 
@@ -188,161 +183,36 @@ fn normalize_value(value: Value) -> ParseResult<Value> {
 
 fn load_documents_preserving_styles<'a, Node: LoadableYamlNode<'a>>(
     input: &'a str,
+    documents: Documents,
 ) -> ParseResult<Vec<Node>> {
     let mut loader = YamlLoader::<Node>::default();
     loader.early_parse(false);
-    // The compatibility API keeps the last value; duplicate validation is opt-in.
-    loader.allow_duplicate_keys(true);
-    crate::load_guard::load(input, |event, span| {
+    crate::load_guard::load(input, documents, |event, span| {
         loader.on_event(event, span);
         if let Some(error) = loader.error() {
-            return Err(ParseError::Scanner(error.clone()));
+            return Err(ParseError::from(error.clone()));
         }
         Ok(())
     })?;
     Ok(loader.into_documents())
 }
 
-fn reject_duplicate_mapping_keys(input: &str) -> ParseResult<()> {
-    let mut detector = DuplicateKeyDetector::default();
-    crate::load_guard::load(input, |event, span| {
-        detector.on_event(event, span);
-        Ok(())
-    })?;
-    detector.finish()
-}
-
-#[derive(Debug, Default)]
-struct DuplicateKeyDetector {
-    containers: Vec<DuplicateKeyContainer>,
-    duplicate: Option<ParseError>,
-}
-
-#[derive(Debug)]
-enum DuplicateKeyContainer {
-    Mapping {
-        keys: BTreeMap<String, Span>,
-        expecting_key: bool,
-        role: Option<ParentRole>,
-    },
-    Sequence {
-        role: Option<ParentRole>,
-    },
-}
-
-#[derive(Debug, Clone, Copy)]
-enum ParentRole {
-    Key,
-    Value,
-}
-
-impl DuplicateKeyDetector {
-    fn finish(self) -> ParseResult<()> {
-        if let Some(error) = self.duplicate {
-            Err(error)
-        } else {
-            Ok(())
-        }
+pub(crate) fn scalar_key(
+    text: &str,
+    style: saphyr::ScalarStyle,
+    tag: Option<&Tag>,
+) -> ParseResult<Value> {
+    if (text == "<<" && style == saphyr::ScalarStyle::Plain && tag.is_none())
+        || tag.is_some_and(|t| t.is_yaml_core_schema() && t.suffix == "merge")
+    {
+        // A merge directive is distinct from a string key whose text is "<<".
+        return Ok(Value::Representation(
+            "<<".into(),
+            saphyr::ScalarStyle::Plain,
+            None,
+        ));
     }
-
-    fn current_parent_role(&self) -> Option<ParentRole> {
-        match self.containers.last() {
-            Some(DuplicateKeyContainer::Mapping { expecting_key, .. }) => {
-                if *expecting_key {
-                    Some(ParentRole::Key)
-                } else {
-                    Some(ParentRole::Value)
-                }
-            }
-            Some(DuplicateKeyContainer::Sequence { .. }) | None => None,
-        }
-    }
-
-    fn complete_node_in_parent(&mut self, role: Option<ParentRole>) {
-        let Some(parent_role) = role else {
-            return;
-        };
-        let Some(DuplicateKeyContainer::Mapping { expecting_key, .. }) = self.containers.last_mut()
-        else {
-            return;
-        };
-        *expecting_key = match parent_role {
-            ParentRole::Key => false,
-            ParentRole::Value => true,
-        };
-    }
-
-    fn record_scalar(&mut self, value: Cow<'_, str>, span: Span) {
-        let Some(DuplicateKeyContainer::Mapping {
-            keys,
-            expecting_key,
-            ..
-        }) = self.containers.last_mut()
-        else {
-            return;
-        };
-
-        if *expecting_key {
-            if value != "<<" {
-                if let Some(first) = keys.get(value.as_ref()) {
-                    self.duplicate = Some(ParseError::DuplicateKey {
-                        key: value.into_owned(),
-                        first_line: first.start.line(),
-                        first_column: first.start.col(),
-                        duplicate_line: span.start.line(),
-                        duplicate_column: span.start.col(),
-                    });
-                } else {
-                    keys.insert(value.into_owned(), span);
-                }
-            }
-            *expecting_key = false;
-        } else {
-            *expecting_key = true;
-        }
-    }
-}
-
-impl<'input> SpannedEventReceiver<'input> for DuplicateKeyDetector {
-    fn on_event(&mut self, ev: Event<'input>, span: Span) {
-        if self.duplicate.is_some() {
-            return;
-        }
-
-        match ev {
-            Event::MappingStart(..) => {
-                let role = self.current_parent_role();
-                self.containers.push(DuplicateKeyContainer::Mapping {
-                    keys: BTreeMap::new(),
-                    expecting_key: true,
-                    role,
-                });
-            }
-            Event::SequenceStart(..) => {
-                let role = self.current_parent_role();
-                self.containers
-                    .push(DuplicateKeyContainer::Sequence { role });
-            }
-            Event::MappingEnd | Event::SequenceEnd => {
-                let role = self.containers.pop().and_then(|container| match container {
-                    DuplicateKeyContainer::Mapping { role, .. }
-                    | DuplicateKeyContainer::Sequence { role } => role,
-                });
-                self.complete_node_in_parent(role);
-            }
-            Event::Scalar(value, ..) => self.record_scalar(value, span),
-            Event::Alias(_) => {
-                if let Some(role) = self.current_parent_role() {
-                    self.complete_node_in_parent(Some(role));
-                }
-            }
-            Event::Nothing
-            | Event::StreamStart
-            | Event::StreamEnd
-            | Event::DocumentStart(_)
-            | Event::DocumentEnd => {}
-        }
-    }
+    normalize_representation(text.to_owned(), style, tag.cloned())
 }
 
 fn normalize_representation(
@@ -356,38 +226,23 @@ fn normalize_representation(
                 "str" => Ok(Value::Value(ScalarOwned::String(text))),
                 "int" => parse_yaml_int(&text)
                     .map(|int| Value::Value(ScalarOwned::Integer(int)))
-                    .ok_or_else(|| ParseError::InvalidTaggedValue {
-                        tag: tag.to_string(),
-                        value: text,
-                    }),
+                    .ok_or_else(|| invalid_tag(&tag)),
                 "float" => parse_core_schema_fp(&text)
                     .map(ordered_float::OrderedFloat)
                     .map(ScalarOwned::FloatingPoint)
                     .map(Value::Value)
-                    .ok_or_else(|| ParseError::InvalidTaggedValue {
-                        tag: tag.to_string(),
-                        value: text,
-                    }),
+                    .ok_or_else(|| invalid_tag(&tag)),
                 "bool" => match text.as_str() {
                     "true" | "True" | "TRUE" => Ok(Value::Value(ScalarOwned::Boolean(true))),
                     "false" | "False" | "FALSE" => Ok(Value::Value(ScalarOwned::Boolean(false))),
-                    _ => Err(ParseError::InvalidTaggedValue {
-                        tag: tag.to_string(),
-                        value: text,
-                    }),
+                    _ => Err(invalid_tag(&tag)),
                 },
                 "null" => match text.as_str() {
                     "" | "~" | "null" | "Null" | "NULL" => Ok(Value::Value(ScalarOwned::Null)),
-                    _ => Err(ParseError::InvalidTaggedValue {
-                        tag: tag.to_string(),
-                        value: text,
-                    }),
+                    _ => Err(invalid_tag(&tag)),
                 },
                 "map" | "seq" => Ok(Value::Representation(text, style, Some(tag))),
-                _ => Err(ParseError::InvalidTaggedValue {
-                    tag: tag.to_string(),
-                    value: text,
-                }),
+                _ => Err(invalid_tag(&tag)),
             };
         }
 
@@ -439,77 +294,47 @@ fn normalize_tagged(tag: Tag, inner: Value) -> ParseResult<Value> {
         "float" => coerce_tagged_float(&normalized, &tag),
         "bool" => coerce_tagged_bool(&normalized, &tag),
         "null" => coerce_tagged_null(&normalized, &tag),
-        _ => Err(ParseError::InvalidTaggedValue {
-            tag: tag.to_string(),
-            value: value_summary(&normalized).to_owned(),
-        }),
+        _ => Err(invalid_tag(&tag)),
     }
 }
 
 fn coerce_tagged_string(value: &Value) -> ParseResult<Value> {
-    let text = scalar_text(value).ok_or_else(|| ParseError::InvalidTaggedValue {
-        tag: "!!str".to_owned(),
-        value: value_summary(value).to_owned(),
-    })?;
+    let text = scalar_text(value).ok_or_else(|| invalid_tag_name("!!str"))?;
     Ok(Value::Value(ScalarOwned::String(text)))
 }
 
 fn coerce_tagged_int(value: &Value, tag: &Tag) -> ParseResult<Value> {
-    let text = scalar_text(value).ok_or_else(|| ParseError::InvalidTaggedValue {
-        tag: tag.to_string(),
-        value: value_summary(value).to_owned(),
-    })?;
+    let text = scalar_text(value).ok_or_else(|| invalid_tag(tag))?;
     parse_yaml_int(&text)
         .map(|int| Value::Value(ScalarOwned::Integer(int)))
-        .ok_or_else(|| ParseError::InvalidTaggedValue {
-            tag: tag.to_string(),
-            value: text,
-        })
+        .ok_or_else(|| invalid_tag(tag))
 }
 
 fn coerce_tagged_float(value: &Value, tag: &Tag) -> ParseResult<Value> {
-    let text = scalar_text(value).ok_or_else(|| ParseError::InvalidTaggedValue {
-        tag: tag.to_string(),
-        value: value_summary(value).to_owned(),
-    })?;
+    let text = scalar_text(value).ok_or_else(|| invalid_tag(tag))?;
     parse_core_schema_fp(&text)
         .map(ordered_float::OrderedFloat)
         .map(ScalarOwned::FloatingPoint)
         .map(Value::Value)
-        .ok_or_else(|| ParseError::InvalidTaggedValue {
-            tag: tag.to_string(),
-            value: text,
-        })
+        .ok_or_else(|| invalid_tag(tag))
 }
 
 fn coerce_tagged_bool(value: &Value, tag: &Tag) -> ParseResult<Value> {
-    let text = scalar_text(value).ok_or_else(|| ParseError::InvalidTaggedValue {
-        tag: tag.to_string(),
-        value: value_summary(value).to_owned(),
-    })?;
+    let text = scalar_text(value).ok_or_else(|| invalid_tag(tag))?;
 
     match text.as_str() {
         "true" | "True" | "TRUE" => Ok(Value::Value(ScalarOwned::Boolean(true))),
         "false" | "False" | "FALSE" => Ok(Value::Value(ScalarOwned::Boolean(false))),
-        _ => Err(ParseError::InvalidTaggedValue {
-            tag: tag.to_string(),
-            value: text,
-        }),
+        _ => Err(invalid_tag(tag)),
     }
 }
 
 fn coerce_tagged_null(value: &Value, tag: &Tag) -> ParseResult<Value> {
-    let text = scalar_text(value).ok_or_else(|| ParseError::InvalidTaggedValue {
-        tag: tag.to_string(),
-        value: value_summary(value).to_owned(),
-    })?;
+    let text = scalar_text(value).ok_or_else(|| invalid_tag(tag))?;
 
     match text.as_str() {
         "" | "~" | "null" | "Null" | "NULL" => Ok(Value::Value(ScalarOwned::Null)),
-        _ => Err(ParseError::InvalidTaggedValue {
-            tag: tag.to_string(),
-            value: text,
-        }),
+        _ => Err(invalid_tag(tag)),
     }
 }
 
@@ -550,7 +375,7 @@ fn parse_yaml_int(text: &str) -> Option<i64> {
     }
 }
 
-fn is_merge_key(key: &Value) -> bool {
+pub(crate) fn is_merge_key(key: &Value) -> bool {
     matches!(key, Value::Representation(text, saphyr::ScalarStyle::Plain, None) if text == "<<")
         || matches!(key, Value::Representation(_, _, Some(tag)) if tag.is_yaml_core_schema() && tag.suffix == "merge")
 }
@@ -604,18 +429,18 @@ fn value_kind(value: &Value) -> &'static str {
     }
 }
 
-fn value_summary(value: &Value) -> &str {
-    match value {
-        Value::Value(ScalarOwned::Null) => "null",
-        Value::Value(ScalarOwned::Boolean(_)) => "boolean",
-        Value::Value(ScalarOwned::Integer(_)) => "integer",
-        Value::Value(ScalarOwned::FloatingPoint(_)) => "float",
-        Value::Value(ScalarOwned::String(_)) => "string",
-        Value::Representation(_, _, _) => "representation",
-        Value::Sequence(_) => "sequence",
-        Value::Mapping(_) => "mapping",
-        Value::Tagged(_, _) => "tagged value",
-        Value::Alias(_) => "alias",
-        Value::BadValue => "bad value",
+fn invalid_tag(tag: &Tag) -> ParseError {
+    match tag.suffix.as_str() {
+        "bool" | "int" | "float" | "null" | "str" | "seq" | "map" => {
+            invalid_tag_name(&tag.to_string())
+        }
+        _ => invalid_tag_name("[unrecognized]"),
+    }
+}
+
+fn invalid_tag_name(tag: &str) -> ParseError {
+    ParseError::InvalidTaggedValue {
+        tag: tag.to_owned(),
+        value: "[redacted]".into(),
     }
 }

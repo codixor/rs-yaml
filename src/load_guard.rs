@@ -100,17 +100,39 @@ impl Budget {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub(crate) enum Documents {
+    Single,
+    Stream,
+}
+
+pub(crate) fn validate(input: &str, documents: Documents) -> ParseResult<()> {
+    load(input, documents, |_, _| Ok(()))
+}
+
 pub(crate) fn load<'a>(
     input: &'a str,
+    documents: Documents,
     mut receive: impl FnMut(Event<'a>, Span) -> ParseResult<()>,
 ) -> ParseResult<()> {
     if input.len() > MAX_INPUT_BYTES {
         return Err(ParseError::ResourceLimit("input bytes"));
     }
     let mut budget = Budget::default();
+    let mut keys = crate::keys::Keys::default();
     for result in Parser::new(BufferedInput::new(input.chars())) {
         let (event, span) = result?;
+        if documents == Documents::Single
+            && budget.documents == 1
+            && matches!(event, Event::DocumentStart(_))
+        {
+            return Err(ParseError::MultipleDocuments {
+                line: span.start.line(),
+                column: span.start.col() + 1,
+            });
+        }
         budget.observe(&event)?;
+        keys.observe(&event, span.start)?;
         receive(event, span)?;
     }
     Ok(())

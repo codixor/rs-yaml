@@ -40,7 +40,12 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod keys;
 mod load_guard;
+#[cfg(feature = "serde")]
+mod typed;
+#[cfg(feature = "serde")]
+pub use typed::{from_str, to_string};
 
 /// YAML emitter for serializing documents to strings.
 pub mod emitter;

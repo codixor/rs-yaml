@@ -19,6 +19,7 @@ assert_eq!(safe_load(&safe_dump(&doc)?)?, doc);
 | API | Use |
 | --- | --- |
 | `Parser`, `Emitter`, `safe_load[_all]`, `safe_dump[_all]` | Read and write the original owned `Value` type. Marked parsing retains source spans. |
+| `from_str::<T>`, `to_string` (feature `serde`) | Deserialize and serialize Rust types that implement Serde traits. |
 | `decode_input`, `decode_input_owned` | Validate UTF-8 and distinguish unsupported byte encodings. |
 | `find_comments`, `has_comments` | Detect YAML comments and access their source ranges before formatting. The formatter discards comments. |
 | `fast` | Full fast-yaml-core 0.8 API, including guarded events, parsing limits, sets, arbitrary-size integers, merge policies and emission budgets. |
@@ -27,7 +28,32 @@ assert_eq!(safe_load(&safe_dump(&doc)?)?, doc);
 
 The default `streaming` feature formats parser events directly. Enable `arena` for the arena-backed formatter. Disabling default features selects the legacy DOM formatter. The facade modules preserve upstream type identity. For example, `parallel::parse_parallel` returns `Vec<fast::Value>`. The compatibility parser uses a separate `rs_yaml::Value` and returns null for an empty stream.
 
+## Typed configurations
+
+On this branch, enable the `serde` feature on `rs-yaml` and the `derive` feature on `serde` to use derived Rust types.
+
+```rust
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize, Serialize)]
+struct Config {
+    enabled: bool,
+    retries: u8,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config: Config = rs_yaml::from_str("enabled: true\nretries: 3")?;
+    let yaml = rs_yaml::to_string(&config)?;
+    assert_eq!(rs_yaml::from_str::<Config>(&yaml)?.retries, 3);
+    Ok(())
+}
+```
+
 ## Handling input
+
+`safe_load`, `Parser::parse_str`, `Parser::parse_marked_str` and typed `from_str` reject a second document, including an empty one. Use `safe_load_all` or `Parser::parse_all_marked` to read a stream. Each mapping must have unique keys. Quoting a string key, changing an integer's spelling, or referring to a key by alias does not make it distinct. An explicit key may override one inherited through a merge. Duplicate-key errors give both source positions. Parsing and Serde errors omit input text and custom Serde messages so they can be logged without quoting configuration values.
+
+The typed adapter uses serde-saphyr after the compatibility checks. The upstream `fast`, `lint` and `parallel` re-exports retain their own parsing and diagnostic policies.
 
 Compatibility loaders cap each input at 8 MiB, expanded nesting at 64 nodes, streams at 4,096 documents, and estimated materialization work at 32 MiB. The estimate charges nodes, text, tags, stored anchors and alias copies. A limit violation returns `ParseError::ResourceLimit`. Use `fast::Parser::parse_all_with_limits` for configurable upstream budgets. Applications reading external files or requests should bound the incoming bytes before collecting them into a string.
 

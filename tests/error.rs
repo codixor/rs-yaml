@@ -41,7 +41,7 @@ fn duplicate_mapping_keys_report_first_and_duplicate_positions() {
             first_line: 2,
             duplicate_line: 3,
             ..
-        } if key == "title"
+        } if key == "[redacted]"
     ));
     assert!(error.to_string().contains("line 2"));
     assert!(error.to_string().contains("line 3"));

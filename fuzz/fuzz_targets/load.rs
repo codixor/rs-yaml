@@ -7,6 +7,9 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(values) = safe_load_all(text) {
         let _ = safe_dump_all(&values);
     }
+    if let Ok(items) = rs_yaml::from_str::<Vec<String>>(text) {
+        let _ = rs_yaml::to_string(&items);
+    }
     let _ = Parser::parse_all_marked(text);
     let _ = Parser::validate_no_duplicate_mapping_keys(text);
     let _ = fast::Parser::parse_all(text);

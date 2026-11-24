@@ -1,0 +1,41 @@
+name: Yank rs-yaml 0.1.1
+on: workflow_dispatch
+permissions: {}
+jobs:
+  yank:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    environment: cratesio
+    timeout-minutes: 3
+    steps:
+      - name: Yank rs-yaml 0.1.1 and record its reason
+        shell: python
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          import json
+          import os
+          import urllib.request
+          from urllib.error import HTTPError
+
+          url = "https://crates.io/api/v1/crates/rs-yaml/0.1.1"
+          reason = "Error messages in this version can expose secret configuration values."
+          body = json.dumps({"version": {"yanked": True, "yank_message": reason}}).encode()
+          request = urllib.request.Request(url, method="PATCH", data=body, headers={
+              "Authorization": os.environ["CARGO_REGISTRY_TOKEN"],
+              "Content-Type": "application/json",
+              "User-Agent": "codixor-rs-yaml-registry-maintenance",
+          })
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *args):
+                  return None
+          try:
+              with urllib.request.build_opener(NoRedirect()).open(request, timeout=25) as response:
+                  version = json.load(response)["version"]
+          except HTTPError as error:
+              raise SystemExit(f"crates.io returned HTTP {error.code}: {error.reason}") from None
+          if (version["crate"], version["num"], version["yanked"], version["yank_message"]) != (
+              "rs-yaml", "0.1.1", True, reason
+          ):
+              raise SystemExit("Unexpected registry response")
+          print("Confirmed rs-yaml 0.1.1 yanked with the requested reason.")

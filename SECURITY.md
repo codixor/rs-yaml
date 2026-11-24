@@ -4,7 +4,7 @@ The standalone import was reviewed on 2026-11-24 using the ECC security-review c
 
 | Surface | Finding and change |
 | --- | --- |
-| Compatibility loading | The original Saphyr loader clones anchors and aliases. All five public parsing/validation paths now account for depth, copies, tag and scalar bytes, and document count before forwarding events to the loader. Merge resolution moves entries into the destination map. |
+| Compatibility loading | The original Saphyr loader clones anchors and aliases. All compatibility parsing and duplicate-key validation paths now account for depth, copies, tag and scalar bytes, and document count before forwarding events to the loader. Merge resolution moves entries into the destination map. |
 | Serialization | Rewriting float spellings in completed text could change user data. Float spellings are now chosen on scalar nodes. Flow keys use the scalar serializer, block-style representations are handled before reaching Saphyr's emitter, and recursive emission has a depth check. |
 | Streaming formatting | Both adapters call fast-yaml-core's guarded event formatters. They check input byte length first. Comments are discarded, and callers can detect them beforehand. |
 | Dependencies | Both Cargo graphs have lockfiles and a cargo-deny policy for RustSec advisories, yanked packages, approved licenses, crate sources and version constraints. The original Saphyr value API and the upstream Rust API use different parser versions. |

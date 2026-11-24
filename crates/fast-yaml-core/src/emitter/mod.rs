@@ -1,0 +1,2214 @@
+// TODO(#374): DumpGraph lands with Python/Node dump integration
+mod flow;
+mod scalar;
+mod walk;
+
+use crate::error::EmitResult;
+use crate::input::NormalizedInput;
+use crate::limits::{Indent, MaxDepth, ParseLimits};
+use crate::value::Value;
+use flow::FlowWriter;
+pub(crate) use walk::EventSink;
+pub use walk::Layout;
+use walk::{WalkOptions, walk};
+
+/// Configuration for YAML emission.
+///
+/// Controls formatting, style, and output options when serializing YAML.
+#[derive(Debug, Clone)]
+pub struct EmitterConfig {
+    /// Indentation width in spaces (default: 2).
+    ///
+    /// Controls the number of spaces used for each indentation level of block collections and
+    /// literal block scalars.
+    pub indent: Indent,
+
+    /// Collection style (default: [`Layout::Block`]).
+    ///
+    /// [`Layout::Flow`] writes every collection inline: `[...]`, `{...}`.
+    pub layout: Layout,
+
+    /// Add explicit document start marker `---` (default: false).
+    ///
+    /// When true, prepends `---\n` to the output.
+    pub explicit_start: bool,
+
+    /// Render multiline strings in literal style (default: false).
+    ///
+    /// When true, strings containing newlines will be rendered
+    /// using literal block scalar notation (`|`).
+    pub multiline_strings: bool,
+
+    /// Maximum nesting depth of a value being emitted (default: [`MaxDepth::MAX`], the deepest
+    /// the parser accepts).
+    ///
+    /// [`Emitter::emit_str_with_config`] fails with
+    /// [`EmitError::DepthLimitExceeded`](crate::EmitError::DepthLimitExceeded) beyond it. The
+    /// emitter keeps its nesting on the heap, so any value up to the maximum is safe on a small
+    /// stack. [`Emitter::format_with_config`] is bounded by [`parse_limits`](Self::parse_limits).
+    pub max_emit_depth: MaxDepth,
+
+    /// Limits enforced while [`Emitter::format_with_config`] parses its input (default:
+    /// [`ParseLimits::default`]).
+    ///
+    /// The formatter never expands aliases, so its alias budget is not applied; depth, `%TAG`
+    /// prefix bytes and [`max_scan_ahead`](ParseLimits::max_scan_ahead) are.
+    pub parse_limits: ParseLimits,
+}
+
+impl Default for EmitterConfig {
+    fn default() -> Self {
+        Self {
+            indent: Indent::DEFAULT,
+            layout: Layout::Block,
+            explicit_start: false,
+            multiline_strings: false,
+            max_emit_depth: MaxDepth::MAX,
+            parse_limits: ParseLimits::default(),
+        }
+    }
+}
+
+impl EmitterConfig {
+    /// Create a new emitter configuration with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set indentation width.
+    #[must_use]
+    pub const fn with_indent(mut self, indent: Indent) -> Self {
+        self.indent = indent;
+        self
+    }
+
+    /// Set the maximum nesting depth of an emitted value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fast_yaml_core::{Emitter, EmitterConfig, MaxDepth, Value};
+    ///
+    /// let nested = Value::Sequence(vec![Value::Sequence(vec![Value::Int(1)])]);
+    /// let shallow = EmitterConfig::new().with_max_emit_depth(MaxDepth::new(1)?);
+    /// assert!(Emitter::emit_str_with_config(&nested, &shallow).is_err());
+    /// assert!(Emitter::emit_str(&nested).is_ok());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub const fn with_max_emit_depth(mut self, max_depth: MaxDepth) -> Self {
+        self.max_emit_depth = max_depth;
+        self
+    }
+
+    /// Set the limits enforced while formatting parses its input.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fast_yaml_core::{Emitter, EmitterConfig, MaxScanAhead, ParseLimits};
+    ///
+    /// let limits = ParseLimits { max_scan_ahead: MaxScanAhead::new(8)?, ..ParseLimits::default() };
+    /// let config = EmitterConfig::new().with_parse_limits(limits);
+    /// assert!(Emitter::format_with_config("[1, 2, 3, 4, 5, 6, 7, 8, 9]", &config).is_err());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub const fn with_parse_limits(mut self, parse_limits: ParseLimits) -> Self {
+        self.parse_limits = parse_limits;
+        self
+    }
+
+    /// Set the collection style.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fast_yaml_core::{Emitter, EmitterConfig, Layout, Value};
+    ///
+    /// let value = Value::Sequence(vec![Value::Int(1), Value::Int(2)]);
+    /// let config = EmitterConfig::new().with_layout(Layout::Flow);
+    /// assert_eq!(Emitter::emit_str_with_config(&value, &config)?, "[1, 2]\n");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub const fn with_layout(mut self, layout: Layout) -> Self {
+        self.layout = layout;
+        self
+    }
+
+    /// Set explicit document start marker.
+    #[must_use]
+    pub const fn with_explicit_start(mut self, explicit_start: bool) -> Self {
+        self.explicit_start = explicit_start;
+        self
+    }
+
+    /// Set multiline string rendering.
+    #[must_use]
+    pub const fn with_multiline_strings(mut self, multiline_strings: bool) -> Self {
+        self.multiline_strings = multiline_strings;
+        self
+    }
+}
+
+/// Emitter for YAML documents.
+///
+/// Serializes a [`Value`] iteratively: it is walked into parser events that the streaming
+/// formatter writes as block YAML, or a flow writer when
+/// [`EmitterConfig::layout`] is [`Layout::Flow`]. Both honor the remembered spelling
+/// of a [`Float`](crate::Float) and quote strings that would otherwise read back as another type.
+///
+/// Emission refuses nesting deeper than [`EmitterConfig::max_emit_depth`] (512 by default, the
+/// deepest the parser accepts) with [`EmitError::DepthLimitExceeded`](crate::EmitError::DepthLimitExceeded). Nesting is kept on the
+/// heap, so no depth needs more stack.
+#[derive(Debug)]
+pub struct Emitter;
+
+impl Emitter {
+    /// Emit a single YAML document to a string with configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EmitError::Format` if the value cannot be serialized,
+    /// `EmitError::DepthLimitExceeded` if it nests deeper than `max_emit_depth`, and
+    /// `EmitError::ComplexFlowKey` if flow style is requested for a sequence or mapping key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fast_yaml_core::{Emitter, EmitterConfig, Value};
+    ///
+    /// let value = Value::String("test".to_string());
+    /// let config = EmitterConfig::new().with_explicit_start(true);
+    /// let yaml = Emitter::emit_str_with_config(&value, &config)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn emit_str_with_config(value: &Value, config: &EmitterConfig) -> EmitResult<String> {
+        let options = WalkOptions {
+            layout: config.layout,
+            multiline: config.multiline_strings,
+            max_depth: config.max_emit_depth,
+        };
+        if config.layout == Layout::Flow {
+            let mut writer = FlowWriter::new(config);
+            walk(value, options, &mut writer)?;
+            return Ok(writer.finish());
+        }
+        crate::streaming::emit_block(config, |sink| walk(value, options, sink))
+    }
+
+    /// Emit a single YAML document to a string with default configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EmitError::Format` if the value cannot be serialized, and
+    /// `EmitError::DepthLimitExceeded` if it nests deeper than 512 levels.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fast_yaml_core::{Emitter, Value};
+    ///
+    /// let value = Value::String("test".to_string());
+    /// let yaml = Emitter::emit_str(&value)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn emit_str(value: &Value) -> EmitResult<String> {
+        Self::emit_str_with_config(value, &EmitterConfig::default())
+    }
+
+    /// Emit multiple YAML documents to a string with document separators and configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EmitError::Format` if any value cannot be serialized, and
+    /// `EmitError::DepthLimitExceeded` if one nests deeper than `max_emit_depth`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fast_yaml_core::{Emitter, EmitterConfig, Value};
+    ///
+    /// let docs = vec![
+    ///     Value::String("first".to_string()),
+    ///     Value::String("second".to_string()),
+    /// ];
+    /// let config = EmitterConfig::new().with_explicit_start(true);
+    /// let yaml = Emitter::emit_all_with_config(&docs, &config)?;
+    /// assert!(yaml.contains("---"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn emit_all_with_config(values: &[Value], config: &EmitterConfig) -> EmitResult<String> {
+        let mut output = String::new();
+
+        // Create single config variant for non-first documents (avoids cloning per document)
+        let inner_config = EmitterConfig {
+            explicit_start: false,
+            ..*config
+        };
+
+        for (i, value) in values.iter().enumerate() {
+            // Add document separator before each document (except first if explicit_start is false)
+            if i > 0 || config.explicit_start {
+                output.push_str("---\n");
+            }
+
+            // Always use inner_config (with explicit_start=false) since we handle
+            // document separators explicitly above
+            let doc = Self::emit_str_with_config(value, &inner_config)?;
+            output.push_str(&doc);
+
+            // Ensure document ends with newline for proper separation
+            if !output.ends_with('\n') {
+                output.push('\n');
+            }
+        }
+
+        Ok(output)
+    }
+
+    /// Emit multiple YAML documents to a string with document separators.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EmitError::Format` if any value cannot be serialized.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fast_yaml_core::{Emitter, Value};
+    ///
+    /// let docs = vec![
+    ///     Value::String("first".to_string()),
+    ///     Value::String("second".to_string()),
+    /// ];
+    /// let yaml = Emitter::emit_all(&docs)?;
+    /// assert!(yaml.contains("---"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn emit_all(values: &[Value]) -> EmitResult<String> {
+        Self::emit_all_with_config(values, &EmitterConfig::default())
+    }
+
+    /// Format a YAML string with configuration.
+    ///
+    /// Uses the streaming formatter, which preserves scalar styles, explicit tags,
+    /// anchors and aliases.
+    ///
+    /// Block scalar styles (`|` literal and `>` folded) are preserved in the output.
+    /// `%YAML` and `%TAG` directives are preserved before the document that declared them.
+    /// A byte order mark at the start of the input is kept; one in a later document prefix is
+    /// dropped (see [`NormalizedInput`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns `EmitError::Parse` if the YAML cannot be parsed, `EmitError::Format` if
+    /// writing fails, and
+    /// `EmitError::DepthLimitExceeded` or `EmitError::AnchorLimitExceeded` if the
+    /// document exceeds the formatter's nesting or per-document anchor limits.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fast_yaml_core::{Emitter, EmitterConfig};
+    ///
+    /// let yaml = "key: value\nlist:\n  - item1\n  - item2\n";
+    /// let config = EmitterConfig::default();
+    /// let formatted = Emitter::format_with_config(yaml, &config)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn format_with_config(input: &str, config: &EmitterConfig) -> EmitResult<String> {
+        Self::format_normalized(&NormalizedInput::new(input)?, config)
+    }
+
+    /// Formats already validated input, for callers that reuse the [`NormalizedInput`] (for
+    /// example to scan it for comments) instead of normalizing the text twice.
+    ///
+    /// A byte order mark at the start of the original text is kept, as in
+    /// [`format_with_config`](Self::format_with_config).
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`format_with_config`](Self::format_with_config).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fast_yaml_core::{Emitter, EmitterConfig, NormalizedInput};
+    ///
+    /// let input = NormalizedInput::new("\u{FEFF}a:   1\n")?;
+    /// let formatted = Emitter::format_normalized(&input, &EmitterConfig::default())?;
+    /// assert_eq!(formatted, "\u{FEFF}a: 1\n");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn format_normalized(
+        input: &NormalizedInput<'_>,
+        config: &EmitterConfig,
+    ) -> EmitResult<String> {
+        let mut formatted = crate::streaming::format_normalized(input, config)?;
+        if input.original_offset(0) > 0 {
+            formatted.insert(0, '\u{FEFF}');
+        }
+        Ok(formatted)
+    }
+
+    /// Format a YAML string with default configuration.
+    ///
+    /// Uses the streaming formatter, which preserves scalar styles, explicit tags,
+    /// anchors and aliases.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EmitError::Parse` if the YAML cannot be parsed, `EmitError::Format` if
+    /// writing fails, and
+    /// `EmitError::DepthLimitExceeded` or `EmitError::AnchorLimitExceeded` if the
+    /// document exceeds the formatter's nesting or per-document anchor limits.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fast_yaml_core::Emitter;
+    ///
+    /// let yaml = "key: value\nlist:\n  - item1\n  - item2\n";
+    /// let formatted = Emitter::format(yaml)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn format(input: &str) -> EmitResult<String> {
+        Self::format_with_config(input, &EmitterConfig::default())
+    }
+}
+
+/// Build a block scalar header: indicator, optional indentation digit, chomp suffix.
+///
+/// The digit is emitted when the first non-empty line starts with a space, since
+/// the parser would otherwise auto-detect the indentation from that leading space
+/// and drop it from the value. `indent` is the content indent relative to
+/// the parent node.
+/// Chomping is `+` (keep) for trailing blank lines or a lone newline, `-` (strip)
+/// without a trailing newline, and clip (nothing) otherwise.
+pub(crate) fn block_scalar_header(indicator: char, value: &str, indent: Indent) -> String {
+    let mut header = String::from(indicator);
+    let leading_space = value
+        .lines()
+        .find(|line| !line.is_empty())
+        .is_some_and(|line| line.starts_with(' '));
+    if leading_space {
+        header.push(indent.digit());
+    }
+    if value.ends_with("\n\n") || value == "\n" {
+        header.push('+');
+    } else if !value.ends_with('\n') {
+        header.push('-');
+    }
+    header
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::EmitError;
+    use crate::value::{Float, Mapping, Set};
+    use std::assert_matches;
+
+    #[test]
+    fn test_emit_str_string() {
+        let value = Value::String("test".to_string());
+        let result = Emitter::emit_str(&value).unwrap();
+        assert!(result.contains("test"));
+    }
+
+    #[test]
+    fn test_emit_str_integer() {
+        let value = Value::Int(42);
+        let result = Emitter::emit_str(&value).unwrap();
+        assert!(result.contains("42"));
+    }
+
+    #[test]
+    fn test_emit_all_multiple() {
+        let values = vec![
+            Value::String("first".to_string()),
+            Value::String("second".to_string()),
+        ];
+        let result = Emitter::emit_all(&values).unwrap();
+        assert!(result.contains("first"));
+        assert!(result.contains("second"));
+        assert!(result.contains("---"));
+    }
+
+    #[test]
+    fn test_emit_all_single() {
+        let values = vec![Value::String("only".to_string())];
+        let result = Emitter::emit_all(&values).unwrap();
+        assert!(result.contains("only"));
+        assert!(!result.starts_with("---"));
+    }
+
+    #[test]
+    fn test_emitter_config_default() {
+        let config = EmitterConfig::default();
+        assert_eq!(config.indent, Indent::DEFAULT);
+        assert_eq!(config.max_emit_depth, MaxDepth::MAX);
+        assert_eq!(config.layout, Layout::Block);
+        assert!(!config.explicit_start);
+        assert!(!config.multiline_strings);
+    }
+
+    #[test]
+    fn test_emitter_config_builder() {
+        let config = EmitterConfig::new()
+            .with_indent(Indent::new(4).unwrap())
+            .with_explicit_start(true);
+
+        assert_eq!(config.indent.get(), 4);
+        assert!(config.explicit_start);
+    }
+
+    #[test]
+    fn test_indent_rejects_out_of_range() {
+        for value in [0, 10, 100] {
+            assert!(Indent::new(value).is_err(), "{value}");
+        }
+        assert_eq!(Indent::new(9), Ok(Indent::MAX));
+    }
+
+    #[test]
+    fn test_max_depth_is_configurable_for_emission() {
+        let mut doc = Value::Int(1);
+        for _ in 0..3 {
+            doc = Value::Sequence(vec![doc]);
+        }
+        let config = EmitterConfig::new().with_max_emit_depth(MaxDepth::new(2).unwrap());
+        for flow in [Layout::Block, Layout::Flow] {
+            let config = config.clone().with_layout(flow);
+            assert_matches!(
+                Emitter::emit_str_with_config(&doc, &config),
+                Err(EmitError::DepthLimitExceeded { limit: 2 })
+            );
+        }
+        let wide = EmitterConfig::new().with_max_emit_depth(MaxDepth::MAX);
+        assert!(Emitter::emit_str_with_config(&doc, &wide).is_ok());
+    }
+
+    #[test]
+    fn test_emit_with_explicit_start() {
+        let value = Value::String("test".to_string());
+        let config = EmitterConfig::new().with_explicit_start(true);
+        let result = Emitter::emit_str_with_config(&value, &config).unwrap();
+        assert!(result.starts_with("---"));
+    }
+
+    #[test]
+    fn test_emit_without_explicit_start() {
+        let value = Value::String("test".to_string());
+        let config = EmitterConfig::new().with_explicit_start(false);
+        let result = Emitter::emit_str_with_config(&value, &config).unwrap();
+        assert!(!result.starts_with("---"));
+    }
+
+    #[test]
+    fn test_emit_all_with_explicit_start() {
+        let values = vec![
+            Value::String("first".to_string()),
+            Value::String("second".to_string()),
+        ];
+        let config = EmitterConfig::new().with_explicit_start(true);
+        let result = Emitter::emit_all_with_config(&values, &config).unwrap();
+        assert!(result.starts_with("---"));
+        assert_eq!(result.matches("---").count(), 2);
+    }
+
+    #[test]
+    fn test_emit_with_multiline_strings() {
+        let value = Value::String("line1\nline2".to_string());
+        let config = EmitterConfig::new().with_multiline_strings(true);
+        let result = Emitter::emit_str_with_config(&value, &config).unwrap();
+        // Should use literal block scalar notation (|)
+        assert!(result.contains("line1") && result.contains("line2"));
+    }
+
+    #[test]
+    fn test_emit_all_empty_slice() {
+        let empty: Vec<Value> = vec![];
+        let config = EmitterConfig::default();
+
+        let result = Emitter::emit_all_with_config(&empty, &config).unwrap();
+        assert!(result.is_empty(), "Empty input should produce empty output");
+    }
+
+    // Regression tests for issue #64: YAML 1.1 boolean-like keys must not be quoted.
+    // In YAML 1.2.2 Core Schema, `on`, `off`, `yes`, `no` are plain strings.
+    #[test]
+    fn test_format_yaml11_bool_key_on() {
+        let result = Emitter::format("on: push").unwrap();
+        assert!(
+            !result.contains("\"on\""),
+            "key `on` must not be quoted, got: {result}"
+        );
+        assert!(result.contains("on:"), "key `on` must appear unquoted");
+    }
+
+    #[test]
+    fn test_format_yaml11_bool_key_off() {
+        let result = Emitter::format("off: value").unwrap();
+        assert!(
+            !result.contains("\"off\""),
+            "key `off` must not be quoted, got: {result}"
+        );
+        assert!(result.contains("off:"), "key `off` must appear unquoted");
+    }
+
+    #[test]
+    fn test_format_yaml11_bool_key_yes() {
+        let result = Emitter::format("yes: value").unwrap();
+        assert!(
+            !result.contains("\"yes\""),
+            "key `yes` must not be quoted, got: {result}"
+        );
+        assert!(result.contains("yes:"), "key `yes` must appear unquoted");
+    }
+
+    #[test]
+    fn test_format_yaml11_bool_key_no() {
+        let result = Emitter::format("no: value").unwrap();
+        assert!(
+            !result.contains("\"no\""),
+            "key `no` must not be quoted, got: {result}"
+        );
+        assert!(result.contains("no:"), "key `no` must appear unquoted");
+    }
+
+    #[test]
+    fn test_format_github_actions_workflow() {
+        let yaml = "on:\n  push:\n    branches:\n      - main\n";
+        let result = Emitter::format(yaml).unwrap();
+        assert!(
+            !result.contains("\"on\""),
+            "GitHub Actions `on:` trigger must not be quoted, got: {result}"
+        );
+        assert!(result.contains("on:"), "on: key must appear unquoted");
+        assert!(result.contains("push:"), "push: key must appear");
+    }
+
+    #[test]
+    fn test_format_yaml12_bools_unaffected() {
+        // YAML 1.2.2 actual booleans must still be emitted as true/false
+        let yaml = "enabled: true\ndisabled: false\n";
+        let result = Emitter::format(yaml).unwrap();
+        assert!(result.contains("true"), "true value must be preserved");
+        assert!(result.contains("false"), "false value must be preserved");
+    }
+
+    #[test]
+    fn test_format_preserves_float_types() {
+        // Regression tests for issue #66: fy format must not change float type to integer
+
+        // 1.0 must remain 1.0
+        let result = Emitter::format("version: 1.0").unwrap();
+        assert!(
+            result.contains("1.0"),
+            "version: 1.0 must emit as float, got: {result}"
+        );
+        assert!(
+            !result.contains(": 1\n"),
+            "version: 1.0 must not become integer 1, got: {result}"
+        );
+
+        // Scientific notation must be preserved
+        let result = Emitter::format("count: 1.23e10").unwrap();
+        assert!(
+            result.contains("1.23e10") || result.contains("1.23e+10"),
+            "Scientific notation must be preserved, got: {result}"
+        );
+        assert!(
+            !result.contains("12300000000"),
+            "Scientific notation must not expand to integer, got: {result}"
+        );
+
+        // Regular float preserved
+        let result = Emitter::format("pi: 3.14").unwrap();
+        assert!(
+            result.contains("3.14"),
+            "3.14 must be preserved, got: {result}"
+        );
+    }
+
+    // Regression tests for issue #62: block scalar styles must be preserved by fy format.
+    #[test]
+    fn test_format_preserves_literal_block_scalar() {
+        let input = "literal: |\n  line one\n  line two\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(
+            result.contains("literal: |"),
+            "literal block style should be preserved, got: {result}"
+        );
+        assert!(result.contains("line one"));
+        assert!(result.contains("line two"));
+    }
+
+    #[test]
+    fn test_format_preserves_folded_block_scalar() {
+        let input = "folded: >\n  word1\n  word2\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(
+            result.contains("folded: >"),
+            "folded block style should be preserved, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_format_nested_literal_block_scalar() {
+        let input = "outer:\n  inner: |\n    line one\n    line two\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(
+            result.contains("inner: |"),
+            "nested literal block should be preserved, got: {result}"
+        );
+        assert!(result.contains("line one"));
+        assert!(result.contains("line two"));
+    }
+
+    #[test]
+    fn test_format_mixed_block_and_plain_values() {
+        let input = "plain: value\nliteral: |\n  block content\nnumber: 42\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(result.contains("plain: value"));
+        assert!(result.contains("literal: |"));
+        assert!(result.contains("block content"));
+        assert!(result.contains("number: 42") || result.contains("number: '42'"));
+    }
+
+    #[test]
+    fn test_format_block_scalar_not_double_quoted() {
+        // Regression: before fix, block scalars were emitted as double-quoted strings
+        let input = "key: |\n  multiline\n  content\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(
+            !result.contains("\"multiline"),
+            "block scalar should not be double-quoted, got: {result}"
+        );
+        assert!(
+            result.contains("key: |"),
+            "literal indicator must be present, got: {result}"
+        );
+    }
+
+    // Regression tests for issue #65: multi-document YAML stream formatting
+    #[test]
+    fn test_format_multidoc_preserves_both_documents() {
+        let input =
+            "---\n- Mark McGwire\n- Sammy Sosa\n\n---\n- Chicago Cubs\n- St Louis Cardinals";
+        let result = Emitter::format(input).unwrap();
+        assert!(result.contains("Mark McGwire"), "First doc must be present");
+        assert!(
+            result.contains("Chicago Cubs"),
+            "Second doc must be present"
+        );
+    }
+
+    #[test]
+    fn test_format_multidoc_separator_present() {
+        let input = "---\nfoo: 1\n---\nbar: 2";
+        let result = Emitter::format(input).unwrap();
+        assert!(result.contains("---"), "Separator must appear in output");
+        assert!(result.contains("foo"), "First doc key must be present");
+        assert!(result.contains("bar"), "Second doc key must be present");
+    }
+
+    #[test]
+    fn test_format_multidoc_issue65_fixture() {
+        let input =
+            "---\n- Mark McGwire\n- Sammy Sosa\n\n---\n- Chicago Cubs\n- St Louis Cardinals";
+        let result = Emitter::format(input).unwrap();
+        assert!(result.contains("Mark McGwire"));
+        assert!(result.contains("Sammy Sosa"));
+        assert!(result.contains("Chicago Cubs"));
+        assert!(result.contains("St Louis Cardinals"));
+        assert!(result.contains("---"));
+    }
+
+    #[test]
+    fn test_format_multidoc_three_documents() {
+        let input = "---\na: 1\n---\nb: 2\n---\nc: 3";
+        let result = Emitter::format(input).unwrap();
+        assert!(result.contains('a'), "First doc must be present");
+        assert!(result.contains('b'), "Second doc must be present");
+        assert!(result.contains('c'), "Third doc must be present");
+        assert!(
+            result.matches("---").count() >= 2,
+            "At least two separators must appear between three documents"
+        );
+    }
+
+    #[test]
+    fn test_format_multidoc_explicit_start() {
+        let input = "---\nfoo: 1\n---\nbar: 2";
+        let config = EmitterConfig::new().with_explicit_start(true);
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(result.contains("foo"), "First doc must be present");
+        assert!(result.contains("bar"), "Second doc must be present");
+        assert!(
+            !result.contains("---\n---"),
+            "Double separator must not appear: {result}"
+        );
+        assert_eq!(
+            result.matches("---").count(),
+            2,
+            "Exactly two separators for two docs"
+        );
+    }
+
+    // Regression tests for issue #75: formatter must not produce trailing spaces
+    // or double-indented sequence-of-mapping keys.
+
+    #[test]
+    fn test_format_nested_mapping_no_trailing_space() {
+        // "parent:\n  child: value" — the colon after "parent" must not be followed
+        // by a space when the value is a nested mapping.
+        let result = Emitter::format("parent:\n  child: value\n").unwrap();
+        assert!(
+            !result.contains("parent: \n"),
+            "trailing space after key with nested value, got: {result:?}"
+        );
+        assert!(
+            result.contains("parent:\n"),
+            "parent key must be followed by newline without space, got: {result:?}"
+        );
+        assert!(
+            result.contains("child: value"),
+            "child key-value must be preserved, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_sequence_of_mappings_indent() {
+        // Steps with mapping items — first key of each item must align with the key,
+        // not be indented an extra level beyond "- ".
+        let yaml = "steps:\n  - uses: actions/checkout@v4\n  - name: Install Rust\n    uses: dtolnay/rust-toolchain@stable\n";
+        let result = Emitter::format(yaml).unwrap();
+        assert!(
+            !result.contains("-     "),
+            "sequence item keys must not be double-indented, got: {result:?}"
+        );
+        assert!(
+            result.contains("- uses:"),
+            "first item key must directly follow dash, got: {result:?}"
+        );
+        assert!(
+            result.contains("uses: actions/checkout@v4"),
+            "got: {result:?}"
+        );
+        assert!(
+            result.contains("uses: dtolnay/rust-toolchain@stable"),
+            "got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_sequence_of_mappings_valid_yaml() {
+        // Output must parse back to the same structure (no trailing spaces breaking YAML).
+        let yaml = "steps:\n  - uses: actions/checkout@v4\n  - name: Install Rust\n    uses: dtolnay/rust-toolchain@stable\n";
+        let result = Emitter::format(yaml).unwrap();
+        let reparsed = crate::Parser::parse_str(&result);
+        assert!(
+            reparsed.is_ok(),
+            "formatted output is invalid YAML: {result:?}"
+        );
+    }
+
+    // Regression tests for issue #76: chomp indicator must not change during formatting.
+
+    #[test]
+    fn test_format_preserves_clip_chomp() {
+        // `|` (clip) must remain `|`, not be converted to `|-`
+        let input = "desc: |\n  line one\n  line two\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(
+            result.contains("desc: |\n"),
+            "clip chomp `|` must not be changed to `|-`, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_format_preserves_strip_chomp() {
+        // `|-` (strip) must remain `|-`
+        let input = "desc: |-\n  line one\n  line two\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(
+            result.contains("desc: |-\n"),
+            "strip chomp `|-` must be preserved, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_format_preserves_keep_chomp() {
+        // `|+` (keep) must remain `|+` when value has trailing blank lines
+        let input = "desc: |+\n  line one\n  line two\n\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(
+            result.contains("desc: |+\n"),
+            "keep chomp `|+` must be preserved, got: {result}"
+        );
+    }
+
+    #[test]
+    fn test_format_preserves_folded_clip_chomp() {
+        // `>` (folded clip) must remain `>`, not be converted to `>-`
+        let input = "desc: >\n  line one\n  line two\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(
+            result.contains("desc: >\n"),
+            "folded clip `>` must not be changed to `>-`, got: {result}"
+        );
+    }
+
+    // Regression tests for issue #94: emit output must always end with newline
+    #[test]
+    fn test_emit_str_ends_with_newline() {
+        let value = Value::String("hello".to_string());
+        let result = Emitter::emit_str(&value).unwrap();
+        assert!(
+            result.ends_with('\n'),
+            "emit_str output must end with newline, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_emit_str_with_config_ends_with_newline_default() {
+        let value = Value::String("hello".to_string());
+        let config = EmitterConfig::default();
+        let result = Emitter::emit_str_with_config(&value, &config).unwrap();
+        assert!(
+            result.ends_with('\n'),
+            "emit_str_with_config output must end with newline (default config), got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_emit_str_with_config_ends_with_newline_explicit_start() {
+        let value = Value::String("hello".to_string());
+        let config = EmitterConfig::new().with_explicit_start(true);
+        let result = Emitter::emit_str_with_config(&value, &config).unwrap();
+        assert!(
+            result.ends_with('\n'),
+            "emit_str_with_config output must end with newline (explicit_start=true), got: {result:?}"
+        );
+    }
+
+    // Regression tests for issue #95: format must preserve %YAML and %TAG directives
+    #[test]
+    fn test_format_preserves_yaml_directive() {
+        let input = "%YAML 1.2\n---\nkey: value\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(
+            result.contains("%YAML 1.2"),
+            "format_with_config must preserve %YAML directive, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_preserves_tag_directive() {
+        let input = "%TAG ! tag:example.com,2000:app/\n---\nkey: value\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(
+            result.contains("%TAG ! tag:example.com,2000:app/"),
+            "format_with_config must preserve %TAG directive, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_without_directives_works_normally() {
+        let input = "key: value\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(
+            result.contains("key: value"),
+            "format_with_config without directives must work normally, got: {result:?}"
+        );
+        assert!(
+            result.ends_with('\n'),
+            "format_with_config output must end with newline, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_yaml_directive_precedes_document_start() {
+        let input = "%YAML 1.2\n---\nkey: value\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        let yaml_pos = result
+            .find("%YAML 1.2")
+            .expect("%YAML directive must be present");
+        let doc_start_pos = result.find("---").expect("--- must be present");
+        assert!(
+            yaml_pos < doc_start_pos,
+            "%YAML directive must appear before ---, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_yaml_and_tag_directives_together() {
+        let input = "%YAML 1.2\n%TAG ! tag:example.com,2000:app/\n---\nkey: value\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(
+            result.contains("%YAML 1.2"),
+            "%YAML directive must be preserved, got: {result:?}"
+        );
+        assert!(
+            result.contains("%TAG ! tag:example.com,2000:app/"),
+            "%TAG directive must be preserved, got: {result:?}"
+        );
+        let yaml_pos = result.find("%YAML 1.2").unwrap();
+        let tag_pos = result.find("%TAG").unwrap();
+        let doc_pos = result.find("---").unwrap();
+        assert!(
+            yaml_pos < doc_pos,
+            "%YAML must precede ---, got: {result:?}"
+        );
+        assert!(tag_pos < doc_pos, "%TAG must precede ---, got: {result:?}");
+    }
+
+    #[test]
+    fn test_emit_str_string_inf_nan_stay_strings() {
+        for text in ["inf", "-inf", "NaN"] {
+            let value = Value::String(text.to_string());
+            let emitted = Emitter::emit_str(&value).unwrap();
+            let reparsed = crate::Parser::parse_str(&emitted).unwrap();
+            assert_eq!(reparsed, Some(value), "{text:?} emitted as {emitted:?}");
+        }
+    }
+
+    #[test]
+    fn test_format_keeps_directives_of_later_documents() {
+        let config = EmitterConfig::default();
+        let input = "a\n...\n%YAML 1.2\n---\nb\n";
+        let once = Emitter::format_with_config(input, &config).unwrap();
+        assert_eq!(once, input);
+        assert_eq!(Emitter::format_with_config(&once, &config).unwrap(), once);
+    }
+
+    #[test]
+    fn test_format_directives_in_every_document() {
+        let config = EmitterConfig::default();
+        let input = "%YAML 1.2\n---\na: 1\n...\n%TAG !e! tag:example.com,2000:\n---\nb: !e!x 2\n...\n%YAML 1.2\n---\nc: 3\n";
+        let once = Emitter::format_with_config(input, &config).unwrap();
+        assert_eq!(once.matches("%YAML 1.2\n---\n").count(), 2);
+        assert!(once.contains("...\n%TAG !e! tag:example.com,2000:\n---\n"));
+        assert_eq!(Emitter::format_with_config(&once, &config).unwrap(), once);
+    }
+
+    #[test]
+    fn test_format_no_document_end_marker_without_directives() {
+        let config = EmitterConfig::default();
+        let input = "a\n---\nb\n";
+        assert_eq!(Emitter::format_with_config(input, &config).unwrap(), input);
+    }
+
+    #[test]
+    fn test_format_directive_after_non_ascii_and_crlf() {
+        let config = EmitterConfig::default();
+        let input = "k: \"\u{e9}\"\r\n...\r\n%YAML 1.2\r\n---\r\nb\r\n";
+        let out = Emitter::format_with_config(input, &config).unwrap();
+        assert!(out.contains("...\n%YAML 1.2\n---\n"), "{out:?}");
+    }
+
+    #[test]
+    fn test_format_percent_scalar_content_is_not_a_directive() {
+        let config = EmitterConfig::default();
+        let input = "--- |\n%YAML 1.2\n---\nb\n";
+        let out = Emitter::format_with_config(input, &config).unwrap();
+        assert!(!out.contains("...\n%YAML"), "{out:?}");
+    }
+
+    #[test]
+    fn test_format_plain_inf_nan_verbatim() {
+        let config = EmitterConfig::default();
+        let input = "a: inf\nb: NaN\nc: -inf\ne: .inf\nf: .nan\ng: !!float inf\n";
+        assert_eq!(Emitter::format_with_config(input, &config).unwrap(), input);
+    }
+
+    #[test]
+    fn test_format_directive_only_on_first_document_in_multidoc_stream() {
+        let input = "%YAML 1.2\n---\nfirst: doc\n---\nsecond: doc\n";
+        let config = EmitterConfig::default();
+        let result = Emitter::format_with_config(input, &config).unwrap();
+        assert!(
+            result.contains("%YAML 1.2"),
+            "%YAML directive must be present in output, got: {result:?}"
+        );
+        // Directive must appear only once (before first document)
+        assert_eq!(
+            result.matches("%YAML 1.2").count(),
+            1,
+            "Directive must appear exactly once, got: {result:?}"
+        );
+        assert!(
+            result.contains("first: doc"),
+            "first document must be present, got: {result:?}"
+        );
+        assert!(
+            result.contains("second: doc"),
+            "second document must be present, got: {result:?}"
+        );
+    }
+
+    // Tests for issue #127: indent and layout must be applied.
+
+    #[test]
+    fn test_emit_with_indent_4() {
+        let mut map = Mapping::new();
+        map.insert(
+            Value::String("key".to_string()),
+            Value::Sequence(vec![Value::Int(1), Value::Int(2)]),
+        );
+        let value = Value::Mapping(map);
+        let config = EmitterConfig::new().with_indent(Indent::new(4).unwrap());
+        let result = Emitter::emit_str_with_config(&value, &config).unwrap();
+        // With indent=4, list items under a key should start with 4 spaces.
+        assert!(
+            result.contains("    - 1") || result.contains("    -"),
+            "indent=4 should produce 4-space indentation, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_emit_flow_layout_mapping() {
+        let mut map = Mapping::new();
+        map.insert(Value::String("a".to_string()), Value::Int(1));
+        map.insert(Value::String("b".to_string()), Value::Int(2));
+        let value = Value::Mapping(map);
+        let config = EmitterConfig::new().with_layout(Layout::Flow);
+        let result = Emitter::emit_str_with_config(&value, &config).unwrap();
+        assert!(
+            result.contains('{') && result.contains('}'),
+            "Layout::Flow should produce flow mapping {{...}}, got: {result:?}"
+        );
+        assert!(result.contains("a: 1"), "mapping key a must be present");
+        assert!(result.contains("b: 2"), "mapping key b must be present");
+    }
+
+    #[test]
+    fn test_string_merge_key_round_trips_in_every_style() {
+        let doc =
+            crate::Parser::parse_str(r#"{"m": {"<<": {"admin": true}, "k": 0}, "n": {"<<": 1}}"#)
+                .unwrap()
+                .unwrap();
+        for flow in [Layout::Block, Layout::Flow] {
+            let config = EmitterConfig::new().with_layout(flow);
+            let yaml = Emitter::emit_str_with_config(&doc, &config).unwrap();
+            assert_eq!(
+                crate::Parser::parse_str(&yaml).unwrap().unwrap(),
+                doc,
+                "{flow:?}: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_strings_with_a_bom_round_trip_in_every_style() {
+        let mut map = Mapping::new();
+        map.insert(
+            Value::String("\u{FEFF}admin".into()),
+            Value::String("a\u{FEFF}b".into()),
+        );
+        map.insert(Value::String("k".into()), Value::String("\u{FEFF}".into()));
+        for doc in [
+            Value::Mapping(map),
+            Value::String("\u{FEFF}root".into()),
+            Value::Sequence(vec![Value::String("\u{FEFF}".into())]),
+        ] {
+            for flow in [Layout::Block, Layout::Flow] {
+                let config = EmitterConfig::new().with_layout(flow);
+                let yaml = Emitter::emit_str_with_config(&doc, &config).unwrap();
+                assert_eq!(
+                    crate::Parser::parse_str(&yaml).unwrap().unwrap(),
+                    doc,
+                    "{flow:?}: {yaml:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_format_escapes_a_bom_inside_scalars() {
+        for input in ["\"\t\u{FEFF}}\"\n", "a: \" \u{FEFF}\"\n"] {
+            let out = Emitter::format(input).unwrap();
+            assert_eq!(
+                crate::Parser::parse_all(input).unwrap(),
+                crate::Parser::parse_all(&out).unwrap(),
+                "{out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_rejects_recursive_aliases() {
+        for input in ["&a [*a]\n", "--- &r\nb: *r\n", "&a {k: *a}\n"] {
+            let err = Emitter::format(input).unwrap_err();
+            assert!(err.to_string().contains("still being defined"), "{err}");
+        }
+        assert!(Emitter::format("a: &x 1\nb: *x\n").is_ok());
+    }
+
+    #[test]
+    fn test_format_writes_an_empty_root_block_scalar_quoted() {
+        for input in [
+            ">\n...\n\u{FEFF}\r1!",
+            "|-\n---\nb\n",
+            "--- >\n--- |+\n--- 1\n",
+        ] {
+            let out = Emitter::format(input).unwrap();
+            assert_eq!(
+                crate::Parser::parse_all(input).unwrap(),
+                crate::Parser::parse_all(&out).unwrap(),
+                "{input:?} -> {out:?}"
+            );
+        }
+        assert_eq!(Emitter::format("k: |-\n").unwrap(), "k: |-\n");
+    }
+
+    #[test]
+    fn test_format_rejects_a_bom_inside_a_document() {
+        for input in [
+            "--- \u{FEFF}x\n",
+            "---\n\u{FEFF}x\n",
+            "--- |-\n  \u{FEFF}x\n",
+            "k: x\u{FEFF}y\n",
+            "  \u{FEFF}{a: 1}",
+            "\t\u{FEFF}}",
+            " \u{FEFF}",
+        ] {
+            assert!(Emitter::format(input).is_err(), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn test_format_escapes_a_bom_that_would_start_the_stream() {
+        for input in [
+            "\n\u{FEFF}- a\n",
+            "\n\u{FEFF}[1, 2]\n",
+            "# c\n\u{FEFF}admin: true\n",
+        ] {
+            let out = Emitter::format(input).unwrap();
+            assert_eq!(
+                crate::Parser::parse_all(input).unwrap(),
+                crate::Parser::parse_all(&out).unwrap(),
+                "{input:?} -> {out:?}"
+            );
+            assert!(!out.contains('\u{FEFF}'), "{out:?}");
+        }
+    }
+
+    #[test]
+    fn test_tag_space_is_stripped_after_a_key_with_leading_unicode_whitespace() {
+        let mut set = Set::new();
+        set.insert(Value::String("a".into()));
+        let mut map = Mapping::new();
+        map.insert(Value::String("k".into()), Value::String("one\ntwo".into()));
+        map.insert(Value::String("\u{A0}j".into()), Value::Set(set));
+        let doc = Value::Mapping(map);
+        let config = EmitterConfig::new().with_multiline_strings(true);
+        let out = Emitter::emit_str_with_config(&doc, &config).unwrap();
+        assert!(out.contains("|-"), "{out:?}");
+        assert!(!out.lines().any(|l| l.ends_with(' ')), "{out:?}");
+        assert_eq!(crate::Parser::parse_str(&out).unwrap().unwrap(), doc);
+    }
+
+    fn map_of(entries: Vec<(&str, Value)>) -> Value {
+        Value::Mapping(
+            entries
+                .into_iter()
+                .map(|(k, v)| (Value::String(k.into()), v))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn test_document_markers_inside_a_block_scalar_survive_any_indent() {
+        let doc = map_of(vec![(
+            "k",
+            map_of(vec![(
+                "v",
+                Value::String("line1\n---x\n...\n%YAML y\nline3".into()),
+            )]),
+        )]);
+        for indent in [2, 4] {
+            let config = EmitterConfig::new()
+                .with_indent(Indent::new(indent).unwrap())
+                .with_multiline_strings(true);
+            let yaml = Emitter::emit_str_with_config(&doc, &config).unwrap();
+            assert_eq!(
+                crate::Parser::parse_str(&yaml).unwrap().unwrap(),
+                doc,
+                "{yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_indent_applies_when_a_key_or_scalar_holds_a_block_indicator() {
+        let doc = map_of(vec![(
+            "x>y",
+            map_of(vec![("c", map_of(vec![("d", Value::Int(1))]))]),
+        )]);
+        let config = EmitterConfig::new().with_indent(Indent::new(4).unwrap());
+        let yaml = Emitter::emit_str_with_config(&doc, &config).unwrap();
+        assert_eq!(yaml, "x>y:\n    c:\n        d: 1\n");
+    }
+
+    #[test]
+    fn test_multiline_strings_a_literal_block_cannot_hold_are_quoted() {
+        for text in [" a\nb", "\n\n", "a\r\nb", "a\n\n", "\tz\nq", "a\rb"] {
+            let doc = map_of(vec![("k", Value::String(text.into()))]);
+            for indent in [2, 4] {
+                let config = EmitterConfig::new()
+                    .with_indent(Indent::new(indent).unwrap())
+                    .with_multiline_strings(true);
+                let yaml = Emitter::emit_str_with_config(&doc, &config).unwrap();
+                assert_eq!(
+                    crate::Parser::parse_str(&yaml).unwrap().unwrap(),
+                    doc,
+                    "{text:?} at indent {indent}: {yaml:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_reindent_ignores_unicode_whitespace_in_keys() {
+        let mut inner = Mapping::new();
+        inner.insert(Value::String("name".into()), Value::String("bob".into()));
+        let mut outer = Mapping::new();
+        outer.insert(Value::String("user".into()), Value::Mapping(inner));
+        for key in [
+            " admin",
+            "\u{A0}admin",
+            "\u{3000}admin",
+            "\u{85}admin",
+            "\u{2028}admin",
+        ] {
+            let mut doc = outer.clone();
+            doc.insert(Value::String(key.into()), Value::Bool(true));
+            let doc = Value::Mapping(doc);
+            for indent in 3..=9 {
+                let config = EmitterConfig::new().with_indent(Indent::new(indent).unwrap());
+                let yaml = Emitter::emit_str_with_config(&doc, &config).unwrap();
+                assert_eq!(
+                    crate::Parser::parse_str(&yaml).unwrap().unwrap(),
+                    doc,
+                    "indent {indent}, key {key:?}: {yaml:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_emit_flow_layout_sequence() {
+        let value = Value::Sequence(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        let config = EmitterConfig::new().with_layout(Layout::Flow);
+        let result = Emitter::emit_str_with_config(&value, &config).unwrap();
+        assert!(
+            result.contains('[') && result.contains(']'),
+            "Layout::Flow should produce flow sequence [...], got: {result:?}"
+        );
+        assert!(result.contains("1, 2, 3"), "sequence items must be inline");
+    }
+
+    #[test]
+    fn test_emit_default_layout_is_block() {
+        let value = Value::Sequence(vec![Value::Int(1), Value::Int(2)]);
+        let config = EmitterConfig::new().with_layout(Layout::Block);
+        let result = Emitter::emit_str_with_config(&value, &config).unwrap();
+        // Block style uses "- " prefix per item.
+        assert!(
+            result.contains("- 1"),
+            "Layout::Block should produce block sequence, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_indent_rescales_block_output() {
+        let config = EmitterConfig::new().with_indent(Indent::new(4).unwrap());
+        let doc = crate::Parser::parse_str("key:\n  nested: value\n")
+            .unwrap()
+            .unwrap();
+        let result = Emitter::emit_str_with_config(&doc, &config).unwrap();
+        assert_eq!(result, "key:\n    nested: value\n");
+        let config = config.with_explicit_start(true);
+        let result = Emitter::emit_str_with_config(&doc, &config).unwrap();
+        assert_eq!(result, "---\nkey:\n    nested: value\n");
+    }
+
+    #[test]
+    fn test_nested_sequences_and_complex_keys_survive_any_indent() {
+        let doc = crate::Parser::parse_str(
+            "perms: [[read, write], [true, 13]]\n? [a, b]\n: [[1], {k: [2]}]\nm: !!set {x, y}\n",
+        )
+        .unwrap()
+        .unwrap();
+        for indent in 1..=9 {
+            let config = EmitterConfig::new().with_indent(Indent::new(indent).unwrap());
+            let yaml = Emitter::emit_str_with_config(&doc, &config).unwrap();
+            assert_eq!(
+                crate::Parser::parse_str(&yaml).unwrap().unwrap(),
+                doc,
+                "indent {indent}: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_format_with_config_keeps_a_leading_bom() {
+        let out =
+            Emitter::format_with_config("\u{FEFF}# c\na: 1\n", &EmitterConfig::default()).unwrap();
+        assert_eq!(out, "\u{FEFF}a: 1\n");
+        let again = Emitter::format_with_config(&out, &EmitterConfig::default()).unwrap();
+        assert_eq!(again, out);
+    }
+
+    #[test]
+    fn test_format_with_config_bom_only_input_stays_bom_only() {
+        let out = Emitter::format_with_config("\u{FEFF}", &EmitterConfig::default()).unwrap();
+        assert_eq!(out.trim_start_matches('\u{FEFF}').trim(), "");
+        assert!(out.starts_with('\u{FEFF}'));
+    }
+
+    #[test]
+    fn test_format_with_config_drops_prefix_boms_of_later_documents() {
+        let out = Emitter::format_with_config(
+            "a\n...\n\u{FEFF}%YAML 1.2\n---\nb\n",
+            &EmitterConfig::default(),
+        )
+        .unwrap();
+        assert!(!out.contains('\u{FEFF}'), "{out:?}");
+        let second = Emitter::format_with_config(&out, &EmitterConfig::default()).unwrap();
+        assert_eq!(second, out);
+    }
+
+    #[test]
+    fn test_format_without_bom_does_not_add_one() {
+        let out = Emitter::format_with_config("a: 1\n", &EmitterConfig::default()).unwrap();
+        assert!(!out.contains('\u{FEFF}'));
+    }
+
+    #[test]
+    fn test_format_with_config_bom_before_directive() {
+        let out = Emitter::format_with_config(
+            "\u{FEFF}%YAML 1.2\n---\na: 1\n",
+            &EmitterConfig::default(),
+        )
+        .unwrap();
+        assert!(out.starts_with("\u{FEFF}%YAML 1.2\n"), "got {out:?}");
+    }
+
+    #[test]
+    fn test_format_with_config_bom_crlf_multi_doc() {
+        let out = Emitter::format_with_config(
+            "\u{FEFF}---\r\na: 1\r\n---\r\nb: 2\r\n",
+            &EmitterConfig::default(),
+        )
+        .unwrap();
+        assert_eq!(out.matches('\u{FEFF}').count(), 1);
+        assert!(out.contains("a: 1") && out.contains("b: 2"));
+    }
+
+    fn format_at(input: &str, indent: usize) -> String {
+        let config = EmitterConfig::new().with_indent(Indent::new(indent).unwrap());
+        Emitter::format_with_config(input, &config).unwrap()
+    }
+
+    /// Asserts value preservation, idempotency and no trailing whitespace; returns the output.
+    fn assert_round_trip(input: &str, indent: usize) -> String {
+        let out = format_at(input, indent);
+        assert_eq!(
+            crate::Parser::parse_all(input).unwrap(),
+            crate::Parser::parse_all(&out).unwrap(),
+            "value changed (indent {indent}): {out:?}"
+        );
+        assert_eq!(
+            out,
+            format_at(&out, indent),
+            "not idempotent (indent {indent})"
+        );
+        assert!(
+            !out.lines().any(|l| l.ends_with(' ')),
+            "trailing whitespace (indent {indent}): {out:?}"
+        );
+        out
+    }
+
+    #[test]
+    fn test_block_scalar_header() {
+        assert_eq!(
+            block_scalar_header('|', "a\n", Indent::new(2).unwrap()),
+            "|"
+        );
+        assert_eq!(block_scalar_header('|', "a", Indent::new(2).unwrap()), "|-");
+        assert_eq!(
+            block_scalar_header('>', "a\n\n", Indent::new(2).unwrap()),
+            ">+"
+        );
+        assert_eq!(
+            block_scalar_header('|', " a\n", Indent::new(4).unwrap()),
+            "|4"
+        );
+        assert_eq!(
+            block_scalar_header('|', " a\n\n", Indent::new(3).unwrap()),
+            "|3+"
+        );
+        assert_eq!(
+            block_scalar_header('|', " a", Indent::new(1).unwrap()),
+            "|1-"
+        );
+        assert_eq!(
+            block_scalar_header('>', "\n  a\n", Indent::new(2).unwrap()),
+            ">2"
+        );
+        assert_eq!(
+            block_scalar_header('|', "\n\n", Indent::new(2).unwrap()),
+            "|+"
+        );
+        assert_eq!(
+            block_scalar_header('|', "\n", Indent::new(2).unwrap()),
+            "|+"
+        );
+        assert_eq!(
+            block_scalar_header('|', "\ta\n", Indent::new(2).unwrap()),
+            "|"
+        );
+    }
+
+    #[test]
+    fn test_block_scalar_leading_space_preserved() {
+        let cases = [
+            "a: |1\n  x\n",
+            "a: |2\n   x\n",
+            "a: |2+\n   x\n\n",
+            "a: |1-\n  x\n  y",
+            "a: >2\n   x\n",
+            "a: |2\n\n    lead\n",
+            "a:\n  b: |2\n     x\n  c: 1\n",
+            "- |1\n  x\n- >1\n  y\n",
+            "k:\n  - |2\n     x\n",
+        ];
+        for indent in [2, 3, 4, 8] {
+            for case in cases {
+                assert_round_trip(case, indent);
+            }
+        }
+        // Siblings of a compact `- -` first child only line up at indent 2 (pre-existing)
+        assert_round_trip("- - |1\n    x\n  - 1\n", 2);
+    }
+
+    #[test]
+    fn test_block_scalar_compact_parents_use_real_column() {
+        let cases = [
+            "- a: |2\n     x\n",
+            "- - |1\n    x\n",
+            "- - - |1\n      x\n",
+            "- - a: |1\n      x\n",
+            "a:\n  - - |1\n      x\n",
+            "- a:\n    b: |1\n      x\n",
+        ];
+        for indent in [2, 3, 4, 8] {
+            for case in cases {
+                assert_round_trip(case, indent);
+            }
+        }
+    }
+
+    #[test]
+    fn test_block_scalar_compact_mapping_sibling_indent_2() {
+        assert_round_trip("- a: |2\n     x\n  b: 1\n", 2);
+    }
+
+    #[test]
+    fn test_block_scalar_root_leading_space() {
+        for case in [
+            "|2\n   root\n",
+            ">2\n   root\n",
+            "--- |1\n  root\n",
+            "|+\n  x\n\n",
+        ] {
+            for indent in [2, 3, 4, 8] {
+                assert_round_trip(case, indent);
+            }
+        }
+    }
+
+    #[test]
+    fn test_block_scalar_lone_newline_keep() {
+        for case in ["a: |+\n\nb: 1\n", "a: |+\n\n\nb: 1\n", "- |+\n\n- 1\n"] {
+            for indent in [2, 4] {
+                assert_round_trip(case, indent);
+            }
+        }
+    }
+
+    #[test]
+    fn test_block_scalar_keep_and_folded_chomp_wide_indent() {
+        let cases = [
+            "a: >+\n  x\n\n",
+            "a: >2+\n   x\n\n\n",
+            "a: |+\n  x\n\n\n\nb: 1\n",
+            "a: |2+\n   x\n\n\nb: 1\n",
+        ];
+        for indent in [3, 4, 8] {
+            for case in cases {
+                assert_round_trip(case, indent);
+            }
+        }
+    }
+
+    #[test]
+    fn test_block_scalar_whitespace_only_first_line_preserved() {
+        let input = "a: |2\n   \n   x\n";
+        for indent in [2, 4] {
+            let out = format_at(input, indent);
+            assert_eq!(
+                crate::Parser::parse_all(input).unwrap(),
+                crate::Parser::parse_all(&out).unwrap(),
+                "{out:?}"
+            );
+            assert_eq!(out, format_at(&out, indent));
+        }
+    }
+
+    #[test]
+    fn test_block_scalar_keep_chomp_stable() {
+        for input in [
+            "a: |+\n  x\n\n\nb: 1\n",
+            "a: |+\n  x\n\n",
+            "- |+\n  x\n\n- y\n",
+        ] {
+            assert_round_trip(input, 2);
+        }
+    }
+
+    #[test]
+    fn test_no_extra_blank_line_after_block_scalar() {
+        let out = format_at("a: |\n  x\nb: 1\n", 2);
+        assert_eq!(out, "a: |\n  x\nb: 1\n");
+    }
+
+    #[test]
+    fn test_null_forms_round_trip() {
+        let cases = [
+            "a:\nb: 1\n",
+            "- \n- x\n",
+            "a: &an\nb: *an\n",
+            "- &an\n- *an\n",
+            "!!set {x, y}\n",
+            "{a, b: }\n",
+            "? a\n: v\n? \n: w\n",
+            "a: ~\nb: null\nc: \"\"\nd: ''\n",
+        ];
+        for case in cases {
+            let out = assert_round_trip(case, 2);
+            assert!(!out.contains(": \n") && !out.contains(":\n"), "got {out:?}");
+        }
+    }
+
+    #[test]
+    fn test_null_value_and_empty_string_distinct() {
+        let out = format_at("a:\nb: \"\"\nc: ~\n", 2);
+        assert!(out.contains("b: \"\""), "got {out:?}");
+        assert!(out.contains("c: ~"), "got {out:?}");
+        assert!(
+            out.starts_with("a: null\n") || out.starts_with("a: ~\n"),
+            "got {out:?}"
+        );
+    }
+
+    #[test]
+    fn test_streaming_omitted_null_emitted_as_null() {
+        assert_eq!(format_at("a:\nb: 1\n", 2), "a: null\nb: 1\n");
+        assert_eq!(format_at("- \n- x\n", 2), "- null\n- x\n");
+        assert_eq!(format_at("a: &an\n", 2), "a: &an null\n");
+    }
+
+    #[test]
+    fn test_empty_document_is_stable() {
+        let out = format_at("---\n", 2);
+        assert_eq!(out, format_at(&out, 2));
+    }
+
+    #[test]
+    fn test_format_preserves_explicit_str_tag() {
+        let out = assert_round_trip("a: !!str 1\n", 2);
+        assert_eq!(out, "a: !!str 1\n");
+        let docs = crate::Parser::parse_all(&out).unwrap();
+        let Value::Mapping(map) = &docs[0] else {
+            panic!("expected mapping, got {:?}", docs[0]);
+        };
+        assert!(
+            map.values()
+                .all(|v| matches!(v, Value::String(s) if s == "1")),
+            "tag lost its string type: {map:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_preserves_custom_tags_on_collections() {
+        let out = assert_round_trip("m: !custom\n  a: 1\ns: !seq\n  - x\n  - y\n", 2);
+        assert!(out.contains("m: !custom\n"), "got {out:?}");
+        assert!(out.contains("s: !seq\n"), "got {out:?}");
+    }
+
+    #[test]
+    fn test_format_preserves_verbatim_tag() {
+        let out = assert_round_trip("a: !<tag:example.com,2000:x> v\n", 2);
+        assert!(out.contains("!<tag:example.com,2000:x> v"), "got {out:?}");
+    }
+
+    #[test]
+    fn test_format_preserves_root_tag() {
+        let out = assert_round_trip("--- !!str foo\n", 2);
+        assert!(out.contains("!!str foo"), "got {out:?}");
+    }
+
+    #[test]
+    fn test_format_preserves_tags_across_documents() {
+        let out = assert_round_trip("--- !!str 1\n--- !custom\na: !!str 2\n", 2);
+        assert!(out.contains("!!str 1"), "got {out:?}");
+        assert!(out.contains("!custom\na:"), "got {out:?}");
+        assert!(out.contains("a: !!str 2"), "got {out:?}");
+    }
+
+    #[test]
+    fn test_format_preserves_anchor_tag_and_alias() {
+        let out = assert_round_trip("a: &x !!str 1\nb: *x\n", 2);
+        assert!(
+            out.contains("&x !!str 1") || out.contains("!!str &x 1"),
+            "got {out:?}"
+        );
+        assert!(out.contains("b: *x"), "got {out:?}");
+    }
+
+    #[test]
+    fn test_format_preserves_tagged_block_scalar() {
+        let out = assert_round_trip("a: !!str |\n  line1\n  line2\n", 2);
+        assert!(out.contains("a: !!str |\n"), "got {out:?}");
+    }
+
+    #[test]
+    fn test_format_empty_input_is_empty() {
+        assert_eq!(format_at("", 2), "");
+    }
+
+    fn flow_with_key(key: Value) -> String {
+        let mut map = Mapping::new();
+        map.insert(key, Value::Int(1));
+        let config = EmitterConfig::new().with_layout(Layout::Flow);
+        Emitter::emit_str_with_config(&Value::Mapping(map), &config).unwrap()
+    }
+
+    fn string_key(s: &str) -> Value {
+        Value::String(s.to_owned())
+    }
+
+    #[test]
+    fn flow_string_keys_are_escaped_and_round_trip() {
+        for key in [
+            "x: \"y\"",
+            "a\nb",
+            "it's",
+            "c\\d",
+            "",
+            "1",
+            "true",
+            "null",
+            ".5",
+            "+.inf",
+            "- a",
+            "[a",
+            "a, b",
+            "&a",
+            "*a",
+            "!t",
+            "a\tb",
+            " a",
+            "a#b",
+            "-.5",
+            "a\u{2028}b",
+            "a\u{85}b",
+            "a\x7fb",
+            "<<",
+        ] {
+            let out = flow_with_key(string_key(key));
+            let Some(Value::Mapping(map)) = crate::Parser::parse_str(&out).unwrap() else {
+                panic!("mapping expected for {key:?}: {out}");
+            };
+            let (k, _) = map.iter().next().unwrap();
+            assert_eq!(k, &string_key(key), "{key:?}: {out}");
+        }
+    }
+
+    #[test]
+    fn flow_keys_over_1024_chars_use_the_explicit_form() {
+        for (len, explicit) in [(1022, false), (1024, false), (1025, true), (3000, true)] {
+            let key = "k".repeat(len);
+            let out = flow_with_key(string_key(&key));
+            assert_eq!(out.starts_with("{? "), explicit, "{len}");
+            let Some(Value::Mapping(back)) = crate::Parser::parse_str(&out).unwrap() else {
+                panic!("mapping expected for {len}");
+            };
+            assert_eq!(back.get(&string_key(&key)), Some(&Value::Int(1)), "{len}");
+        }
+        let quoted = "k\u{85}".repeat(600);
+        let out = flow_with_key(string_key(&quoted));
+        assert!(out.starts_with("{? \""), "{out:.20}");
+        let Some(Value::Mapping(back)) = crate::Parser::parse_str(&out).unwrap() else {
+            panic!("mapping expected");
+        };
+        assert!(back.contains_key(&string_key(&quoted)));
+    }
+
+    #[test]
+    fn flow_scalars_with_question_marks_are_quoted() {
+        for text in ["a?b", "?", "x ?", "? x", "a ? b"] {
+            let doc = Value::Sequence(vec![string_key(text)]);
+            let config = EmitterConfig::new().with_layout(Layout::Flow);
+            let out = Emitter::emit_str_with_config(&doc, &config).unwrap();
+            assert_eq!(out, format!("[\"{text}\"]\n"));
+            assert_eq!(crate::Parser::parse_str(&out).unwrap().unwrap(), doc);
+        }
+        assert_eq!(
+            Emitter::emit_str(&Value::Sequence(vec![string_key("a?b")])).unwrap(),
+            "- a?b\n"
+        );
+    }
+
+    #[test]
+    fn yaml_11_line_breaks_are_escaped_in_every_dump_position() {
+        for text in ["\u{85}", "a\u{2028}b", "\u{2029}x\nz", "p\u{85}"] {
+            let mut map = Mapping::new();
+            map.insert(string_key(text), string_key(text));
+            let docs = [
+                string_key(text),
+                Value::Sequence(vec![string_key(text)]),
+                Value::Mapping(map),
+            ];
+            for doc in &docs {
+                for flow in [Layout::Block, Layout::Flow] {
+                    for multiline in [false, true] {
+                        let config = EmitterConfig::new()
+                            .with_layout(flow)
+                            .with_multiline_strings(multiline);
+                        let out = Emitter::emit_str_with_config(doc, &config).unwrap();
+                        assert!(
+                            !out.contains(['\u{85}', '\u{2028}', '\u{2029}']),
+                            "{doc:?} {flow:?}: {out:?}"
+                        );
+                        assert_eq!(&crate::Parser::parse_str(&out).unwrap().unwrap(), doc);
+                    }
+                }
+            }
+            let sets = Value::Set(std::iter::once(string_key(text)).collect::<crate::value::Set>());
+            for flow in [Layout::Block, Layout::Flow] {
+                let config = EmitterConfig::new().with_layout(flow);
+                let out = Emitter::emit_str_with_config(&sets, &config).unwrap();
+                assert!(!out.contains(['\u{85}', '\u{2028}', '\u{2029}']), "{out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn format_escapes_yaml_11_line_breaks_in_every_style() {
+        for input in [
+            "a: \"x\u{85}y\"\n",
+            "a: 'x\u{2028}y'\n",
+            "a: x\u{2029}y\n",
+            "\"k\u{85}\": v\n",
+            "[\"x\u{85}\"]\n",
+        ] {
+            let out = Emitter::format(input).unwrap();
+            assert!(
+                !out.contains(['\u{85}', '\u{2028}', '\u{2029}']),
+                "{input:?} -> {out:?}"
+            );
+            assert_eq!(
+                crate::Parser::parse_all(&out).unwrap(),
+                crate::Parser::parse_all(input).unwrap(),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn flow_merge_lookalike_key_is_quoted() {
+        assert_eq!(flow_with_key(string_key("<<")), "{\"<<\": 1}\n");
+    }
+
+    #[test]
+    fn non_string_lookalike_strings_round_trip_in_every_position() {
+        for text in [
+            "+.inf", "+.Inf", "+.INF", ".5", "-.5", "+.5e3", ".inf", "1", "true", "null",
+        ] {
+            let mut inner = Mapping::new();
+            inner.insert(string_key(text), string_key(text));
+            let value = Value::Mapping(inner);
+            let seq = Value::Sequence(vec![string_key(text), value.clone()]);
+            for flow in [false, true] {
+                let config = EmitterConfig::new().with_layout(if flow {
+                    Layout::Flow
+                } else {
+                    Layout::Block
+                });
+                for doc in [&value, &seq, &string_key(text)] {
+                    let out = Emitter::emit_str_with_config(doc, &config).unwrap();
+                    let back = crate::Parser::parse_str(&out).unwrap().unwrap();
+                    assert_eq!(&back, doc, "{text:?} flow={flow}: {out}");
+                }
+            }
+        }
+    }
+
+    const BIG: &str = "123456789012345678901234567890";
+
+    fn roundtrip_all_styles(doc: &Value) {
+        for flow in [Layout::Block, Layout::Flow] {
+            let config = EmitterConfig::new().with_layout(flow);
+            let out = Emitter::emit_str_with_config(doc, &config).unwrap();
+            let back = crate::Parser::parse_str(&out).unwrap().unwrap();
+            let again = Emitter::emit_str_with_config(&back, &config).unwrap();
+            assert_eq!(out, again, "flow={flow:?}: {out}");
+            assert!(out.contains(BIG) && !out.contains("tag:yaml.org"), "{out}");
+        }
+    }
+
+    #[test]
+    fn emit_parsed_block_scalar_big_int_does_not_panic() {
+        for input in [
+            format!("? !!int >-\n  {BIG}\n: v\n"),
+            format!("? !!int |-\n  {BIG}\n: v\n"),
+            format!("k: !!int |-\n  {BIG}\n"),
+            format!("- !!int >-\n  {BIG}\n"),
+            format!("--- !!int |-\n  -{BIG}\n"),
+            format!("k: &a !!int >-\n  {BIG}\nj: *a\n"),
+        ] {
+            let doc = crate::Parser::parse_str(&input).unwrap().unwrap();
+            roundtrip_all_styles(&doc);
+            let out = Emitter::emit_str(&doc).unwrap();
+            assert!(out.contains(BIG), "{input:?} -> {out:?}");
+        }
+    }
+
+    #[test]
+    fn emit_core_tagged_quoted_big_int_has_no_expanded_tag() {
+        for input in [
+            format!("k: !!int \"{BIG}\"\n"),
+            format!("k: !!int '{BIG}'\n"),
+        ] {
+            let doc = crate::Parser::parse_str(&input).unwrap().unwrap();
+            roundtrip_all_styles(&doc);
+            assert_eq!(Emitter::emit_str(&doc).unwrap(), format!("k: {BIG}\n"));
+        }
+    }
+
+    #[test]
+    fn emit_custom_tagged_big_int_drops_the_tag() {
+        let input = format!("k: !foo {BIG}\n");
+        let doc = crate::Parser::parse_str(&input).unwrap().unwrap();
+        assert_eq!(Emitter::emit_str(&doc).unwrap(), format!("k: {BIG}\n"));
+        let flow = EmitterConfig::new().with_layout(Layout::Flow);
+        assert_eq!(
+            Emitter::emit_str_with_config(&doc, &flow).unwrap(),
+            format!("{{k: {BIG}}}\n")
+        );
+    }
+
+    #[test]
+    fn emit_radix_big_ints_in_flow_collections_and_keys_as_decimal() {
+        let decimal = "4722366482869645213695";
+        for input in [
+            "[0xFFFFFFFFFFFFFFFFFF]",
+            "{a: 0xFFFFFFFFFFFFFFFFFF}",
+            "{0xFFFFFFFFFFFFFFFFFF: a}",
+            "0xFFFFFFFFFFFFFFFFFF: a\nb: [0o7777777777777777777777]\n",
+        ] {
+            let doc = crate::Parser::parse_str(input).unwrap().unwrap();
+            for out in emit_both(&doc) {
+                assert!(!out.contains("0x") && !out.contains("0o"), "{input}: {out}");
+                let back = crate::Parser::parse_str(&out).unwrap().unwrap();
+                assert!(!Emitter::emit_str(&back).unwrap().contains("0x"), "{input}");
+            }
+        }
+        let doc = crate::Parser::parse_str("{0xFFFFFFFFFFFFFFFFFF: 0xFFFFFFFFFFFFFFFFFF}")
+            .unwrap()
+            .unwrap();
+        let flow = EmitterConfig::new().with_layout(Layout::Flow);
+        assert_eq!(
+            Emitter::emit_str_with_config(&doc, &flow).unwrap(),
+            format!("{{{decimal}: {decimal}}}\n")
+        );
+    }
+
+    #[test]
+    fn emit_radix_big_ints_as_canonical_decimal_and_quote_strings() {
+        let doc =
+            crate::Parser::parse_str("a: 0xFFFFFFFFFFFFFFFFFF\nb: 0o7777777777777777777777\n")
+                .unwrap()
+                .unwrap();
+        let decimal =
+            crate::Parser::parse_str("a: 4722366482869645213695\nb: 73786976294838206463\n")
+                .unwrap()
+                .unwrap();
+        for out in emit_both(&doc) {
+            let back = crate::Parser::parse_str(&out).unwrap().unwrap();
+            assert_eq!(back, decimal, "{out}");
+        }
+        assert_eq!(
+            Emitter::emit_str(&doc).unwrap(),
+            "a: 4722366482869645213695\nb: 73786976294838206463\n"
+        );
+        let quoted = crate::Parser::parse_str("a: \"0xFFFFFFFFFFFFFFFFFF\"\n")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            Emitter::emit_str(&quoted).unwrap(),
+            "a: \"0xFFFFFFFFFFFFFFFFFF\"\n"
+        );
+    }
+
+    #[test]
+    fn emit_all_with_block_scalar_big_ints() {
+        let docs = [
+            crate::Parser::parse_str(&format!("!!int |-\n  {BIG}\n"))
+                .unwrap()
+                .unwrap(),
+            crate::Parser::parse_str(&format!("k: !!int >-\n  {BIG}\n"))
+                .unwrap()
+                .unwrap(),
+        ];
+        let out = Emitter::emit_all(&docs).unwrap();
+        assert_eq!(out.matches(BIG).count(), 2, "{out}");
+    }
+
+    fn emit_both(doc: &Value) -> [String; 2] {
+        [Layout::Block, Layout::Flow].map(|flow| {
+            let config = EmitterConfig::new().with_layout(flow);
+            Emitter::emit_str_with_config(doc, &config).unwrap()
+        })
+    }
+
+    #[test]
+    fn emit_nested_block_scalar_key_and_negative_big_int() {
+        for input in [
+            format!("a:\n  b:\n    ? !!int >-\n      {BIG}\n    : v\n"),
+            format!("--- !!int |-\n  -{BIG}\n"),
+        ] {
+            let doc = crate::Parser::parse_str(&input).unwrap().unwrap();
+            roundtrip_all_styles(&doc);
+        }
+    }
+
+    #[test]
+    fn emit_all_flow_with_block_scalar_big_ints() {
+        let docs = [
+            crate::Parser::parse_str(&format!("!!int |-\n  {BIG}\n"))
+                .unwrap()
+                .unwrap(),
+            crate::Parser::parse_str(&format!("k: !!int >-\n  {BIG}\n"))
+                .unwrap()
+                .unwrap(),
+        ];
+        let config = EmitterConfig::new().with_layout(Layout::Flow);
+        let out = Emitter::emit_all_with_config(&docs, &config).unwrap();
+        assert_eq!(out.matches(BIG).count(), 2, "{out}");
+    }
+
+    const NON_PRINTABLE: &str = "q\"u\\o\x7Ft\u{86}e\u{FFFE}d\u{FFFF}";
+
+    #[test]
+    fn non_printable_strings_round_trip_in_every_position() {
+        let text = string_key(NON_PRINTABLE);
+        let mut keyed = Mapping::new();
+        keyed.insert(text.clone(), text.clone());
+        let docs = [
+            text.clone(),
+            Value::Sequence(vec![text]),
+            Value::Mapping(keyed),
+        ];
+        for flow in [Layout::Block, Layout::Flow] {
+            let config = EmitterConfig::new().with_layout(flow);
+            for doc in &docs {
+                let out = Emitter::emit_str_with_config(doc, &config).unwrap();
+                assert!(
+                    !out.contains(['\u{FFFE}', '\u{FFFF}', '\u{7F}', '\u{86}']),
+                    "{out:?}"
+                );
+                let back = crate::Parser::parse_str(&out).unwrap().unwrap();
+                assert_eq!(&back, doc, "flow={flow:?}: {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn float_spelling_is_written_by_both_emitters() {
+        let float = |t: &str| Value::Float(Float::parse(t).unwrap());
+        let mut map = Mapping::new();
+        map.insert(string_key("a"), float("1.0E5"));
+        map.insert(string_key("b"), float("0.10"));
+        map.insert(string_key("c"), Value::Float(Float::new(100_000.0)));
+        let doc = Value::Mapping(map);
+        assert_eq!(
+            Emitter::emit_str(&doc).unwrap(),
+            "a: 1.0E+5\nb: 0.10\nc: 100000.0\n"
+        );
+        let flow = EmitterConfig::new().with_layout(Layout::Flow);
+        assert_eq!(
+            Emitter::emit_str_with_config(&doc, &flow).unwrap(),
+            "{a: 1.0E+5, b: 0.10, c: 100000.0}\n"
+        );
+    }
+
+    #[test]
+    fn special_floats_are_core_schema_in_values_and_keys() {
+        let floats = [
+            Value::Float(Float::new(f64::NAN)),
+            Value::Float(Float::new(f64::INFINITY)),
+            Value::Float(Float::new(f64::NEG_INFINITY)),
+        ];
+        for flow in [Layout::Block, Layout::Flow] {
+            let config = EmitterConfig::new().with_layout(flow);
+            for float in &floats {
+                let mut map = Mapping::new();
+                map.insert(float.clone(), float.clone());
+                let doc = Value::Mapping(map);
+                let out = Emitter::emit_str_with_config(&doc, &config).unwrap();
+                let back = crate::Parser::parse_str(&out).unwrap().unwrap();
+                assert_eq!(back, doc, "flow={flow:?}: {out:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn nesting_beyond_the_emit_depth_is_an_error_not_a_stack_overflow() {
+        let mut doc = Value::Int(1);
+        for _ in 0..=MaxDepth::MAX.get() {
+            doc = Value::Sequence(vec![doc]);
+        }
+        for flow in [Layout::Block, Layout::Flow] {
+            let config = EmitterConfig::new().with_layout(flow);
+            let err = Emitter::emit_str_with_config(&doc, &config).unwrap_err();
+            assert_matches!(
+                err,
+                EmitError::DepthLimitExceeded { limit: 512 },
+                "flow={flow:?}: {err:?}"
+            );
+        }
+        let mut ok = Value::Int(1);
+        for _ in 0..MaxDepth::MAX.get() {
+            ok = Value::Sequence(vec![ok]);
+        }
+        assert!(Emitter::emit_str(&ok).is_ok());
+    }
+
+    #[test]
+    fn collection_keys_fail_in_flow_style_only() {
+        let mut map = Mapping::new();
+        map.insert(Value::Sequence(vec![Value::Int(1)]), Value::Int(2));
+        let doc = Value::Mapping(map);
+        assert!(Emitter::emit_str(&doc).is_ok());
+        let flow = EmitterConfig::new().with_layout(Layout::Flow);
+        assert_matches!(
+            Emitter::emit_str_with_config(&doc, &flow),
+            Err(EmitError::ComplexFlowKey)
+        );
+    }
+
+    #[test]
+    fn emit_set_round_trips_in_block_and_flow() {
+        for yaml in [
+            "!!set {a, b}",
+            "m: !!set {a}",
+            "!!set {1, a}",
+            "outer:\n  inner: !!set {x, y}\nlist: [!!set {k}]",
+            "list: [!!set {}]",
+            "m: !!omap [a: 1, b: 2]",
+            "k: !!str 123",
+            "!!set {null, true, 1.5, '1'}",
+        ] {
+            let doc = crate::Parser::parse_str(yaml).unwrap().unwrap();
+            for out in emit_both(&doc) {
+                assert_eq!(out.contains("!!set"), yaml.contains("!!set"), "{out}");
+                let back = crate::Parser::parse_str(&out).unwrap().unwrap();
+                assert_eq!(back, doc, "{yaml} -> {out}");
+            }
+        }
+    }
+
+    #[test]
+    fn emit_block_tagged_collection_has_no_trailing_space() {
+        let doc = crate::Parser::parse_str("k: !!set {a, b}\nl:\n  - !!set {c}\ns: \"x !t \\n\"")
+            .unwrap()
+            .unwrap();
+        let out = Emitter::emit_str(&doc).unwrap();
+        assert!(out.lines().all(|l| !l.ends_with(' ')), "{out:?}");
+        assert_eq!(crate::Parser::parse_str(&out).unwrap().unwrap(), doc);
+    }
+
+    #[test]
+    fn emit_literal_block_keeps_trailing_space_after_bang_word() {
+        let doc = crate::Parser::parse_str("k: \"a !b \\nc\\n\"")
+            .unwrap()
+            .unwrap();
+        let config = EmitterConfig::new().with_multiline_strings(true);
+        let out = Emitter::emit_str_with_config(&doc, &config).unwrap();
+        assert_eq!(
+            crate::Parser::parse_str(&out).unwrap().unwrap(),
+            doc,
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn emit_set_members_that_are_collections_fail_in_flow_only() {
+        let mut set = Set::new();
+        set.insert(Value::Sequence(vec![Value::Int(1)]));
+        let doc = Value::Set(set);
+        assert!(Emitter::emit_str(&doc).is_ok());
+        let flow = EmitterConfig::new().with_layout(Layout::Flow);
+        assert_matches!(
+            Emitter::emit_str_with_config(&doc, &flow),
+            Err(EmitError::ComplexFlowKey)
+        );
+    }
+
+    #[test]
+    fn emit_set_as_a_key_or_member_is_an_error() {
+        let set = |member: &str| {
+            let mut set = Set::new();
+            set.insert(Value::String(member.into()));
+            Value::Set(set)
+        };
+        let mut as_key = Mapping::new();
+        as_key.insert(set("a"), Value::Int(1));
+        let mut nested = Set::new();
+        nested.insert(set("a"));
+        for doc in [Value::Mapping(as_key), Value::Set(nested)] {
+            for flow in [Layout::Block, Layout::Flow] {
+                let config = EmitterConfig::new().with_layout(flow);
+                assert_matches!(
+                    Emitter::emit_str_with_config(&doc, &config),
+                    Err(EmitError::SetAsKey | EmitError::ComplexFlowKey),
+                    "{flow:?}"
+                );
+            }
+        }
+    }
+}

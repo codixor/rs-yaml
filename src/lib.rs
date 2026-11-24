@@ -70,7 +70,7 @@ pub use value::{
     Array, Map, MarkedValue, Marker, OrderedFloat, ScalarOwned, Span, Value, YamlDataOwned,
 };
 
-/// Upstream Rust API, including budgeted loading, events, scalar resolution and bounded emission.
+/// Codixor's fast-yaml-core fork, including budgeted loading, events, scalar resolution and bounded emission.
 /// Its resolved value type is distinct from the span/style-preserving compatibility types.
 pub use fast_yaml_core as fast;
 pub use fast_yaml_core::{

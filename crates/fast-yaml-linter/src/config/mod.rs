@@ -1,0 +1,53 @@
+//! Typed rule configuration, config files and builders.
+
+pub mod config_file;
+mod ignore_source;
+mod indent;
+mod locale;
+#[cfg(test)]
+mod options_tests;
+mod path_patterns;
+mod preset;
+mod rules;
+mod values;
+
+pub use config_file::{
+    ConfigFile, ConfigFileError, FileSelection, MAX_CONFIG_FILE_BYTES, MAX_EXTENDS_DEPTH,
+    TopLevelKey,
+};
+pub use indent::{IndentSequences, IndentSpaces};
+pub use locale::LocaleName;
+pub(crate) use path_patterns::is_valid_pattern;
+pub use path_patterns::{
+    BudgetKind, CanonicalPath, IgnorePatterns, InvalidPathPattern, MAX_PATH_PATTERNS,
+    MAX_PATTERN_WILDCARDS, YamlFiles,
+};
+pub use preset::{Preset, UnknownPresetError};
+pub use rules::{
+    CustomRuleCode, EntryOrigin, NoOptions, OptionConflict, RuleConfigError, RuleIgnore, RuleName,
+    RuleOptions, RuleSettings, RulesConfig, UnknownRuleError,
+};
+pub(crate) use rules::{IgnoreBase, default_rules};
+pub use values::{
+    AlwaysTrue, EmptyInsideLimit, IndentSize, InvalidIndentSize, InvalidMaxDiagnostics,
+    InvalidPatternList, InvalidRegexPattern, Limit, MarkerPresence, MaxDiagnostics, PatternList,
+};
+pub(crate) use values::{BoolOrName, deserialize_bool_or_name};
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{RuleName, RulesConfig};
+    use crate::LintConfig;
+
+    /// Builds a config where one rule is configured from a YAML entry.
+    pub fn config_with_rule(name: RuleName, entry: &str) -> LintConfig {
+        let mut rules = RulesConfig::default();
+        rules
+            .apply_rule(name, serde_norway::Deserializer::from_str(entry))
+            .unwrap();
+        LintConfig {
+            rules,
+            ..LintConfig::default()
+        }
+    }
+}

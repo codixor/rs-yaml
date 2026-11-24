@@ -49,11 +49,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 scripts/release.py
-      - name: Publish the checked-out version
-        if: steps.release.outputs.publish == 'true'
+      - name: Publish missing workspace packages in dependency order
+        if: steps.release.outputs.pending != ''
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --locked --registry crates-io
+          PENDING: ${{ steps.release.outputs.pending }}
+        shell: bash
+        run: |
+          read -ra packages <<< "$PENDING"
+          for package in "${packages[@]}"; do
+            cargo publish --locked --registry crates-io -p "$package"
+          done
       - name: Create the GitHub tag and release
         if: steps.release.outputs.create_release == 'true'
         env:

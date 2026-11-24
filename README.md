@@ -1,10 +1,10 @@
 # rs-yaml
 
-A Rust 1.100 library for parsing, emitting, formatting and linting YAML. The compatibility API re-exports Saphyr 0.4 value and span types. Callers that also name those types through a direct Saphyr dependency should use the 0.4 series. Marked block scalar spans start at the `|` or `>` indicator. The standalone crate also exposes the Rust libraries from [fast-yaml](https://github.com/bug-ops/fast-yaml).
+A Rust 1.100 library for parsing, emitting, formatting and linting YAML. The compatibility API re-exports Saphyr 0.4 value and span types. Callers that also name those types through a direct Saphyr dependency should use the 0.4 series. Marked block scalar spans start at the `|` or `>` indicator. The standalone crate also exposes Codixor-maintained forks of the Rust libraries from [fast-yaml](https://github.com/bug-ops/fast-yaml).
 
 ```toml
 [dependencies]
-rs-yaml = "0.2.0"
+rs-yaml = "0.3.0"
 ```
 
 ```rust
@@ -26,7 +26,7 @@ assert_eq!(safe_load(&safe_dump(&doc)?)?, doc);
 | `lint` (feature `lint`) | Rule-based diagnostics, configurable rules, source locations and text, JSON and SARIF output. |
 | `parallel` (feature `parallel`) | Ordered multi-document parsing, worker limits and file batch operations. |
 
-The default `streaming` feature formats parser events directly. Enable `arena` for the arena-backed formatter. Disabling default features selects the legacy DOM formatter. The facade modules preserve upstream type identity. For example, `parallel::parse_parallel` returns `Vec<fast::Value>`. The compatibility parser uses a separate `rs_yaml::Value` and returns null for an empty stream.
+The default `streaming` feature formats parser events directly. Enable `arena` for the arena-backed formatter. Disabling default features selects the legacy DOM formatter. The three facade modules share the Codixor fork types. For example, `parallel::parse_parallel` returns `Vec<fast::Value>`. When migrating from 0.2, import these types through `rs_yaml` or use the matching `codixor-fast-yaml-core`, `codixor-fast-yaml-linter` and `codixor-fast-yaml-parallel` packages. Direct imports from the original fast-yaml packages have different type identities. The compatibility parser uses a separate `rs_yaml::Value` and returns null for an empty stream.
 
 ## Typed configurations
 
@@ -49,13 +49,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+For a Serde `u32` file mode, write `mode: 0o600` (octal) or `mode: 384` (decimal). The typed loader rejects the legacy spelling `mode: 0600`.
+
 ## Handling input
 
 `safe_load`, `Parser::parse_str`, `Parser::parse_marked_str` and typed `from_str` reject a second document, including an empty one. Use `safe_load_all` or `Parser::parse_all_marked` to read a stream. Each mapping must have unique keys. Quoting a string key, changing an integer's spelling, or referring to a key by alias does not make it distinct. An explicit key may override one inherited through a merge. Duplicate-key errors give both source positions. Parsing and Serde errors omit input text and custom Serde messages so they can be logged without quoting configuration values.
 
-The typed adapter uses serde-saphyr after the compatibility checks. The upstream `fast`, `lint` and `parallel` re-exports retain their own parsing and diagnostic policies.
+The typed adapter uses serde-saphyr after the compatibility checks. The `fast`, `lint` and `parallel` re-exports retain their own parsing and diagnostic policies.
 
-Compatibility loaders cap each input at 8 MiB, expanded nesting at 64 nodes, streams at 4,096 documents, and estimated materialization work at 32 MiB. The estimate charges nodes, text, tags, stored anchors and alias copies. A limit violation returns `ParseError::ResourceLimit`. Use `fast::Parser::parse_all_with_limits` for configurable upstream budgets. Applications reading external files or requests should bound the incoming bytes before collecting them into a string.
+Compatibility loaders cap each input at 8 MiB, expanded nesting at 64 nodes, streams at 4,096 documents, and estimated materialization work at 32 MiB. The estimate charges nodes, text, tags, stored anchors and alias copies. A limit violation returns `ParseError::ResourceLimit`, including when Saphyr reaches its own flow-nesting or alias-expansion limit. Use `fast::Parser::parse_all_with_limits` for configurable upstream budgets. Applications reading external files or requests should bound the incoming bytes before collecting them into a string.
 
 ## Development
 
@@ -65,4 +67,4 @@ Imported from [codixor/rust-misc at ae68abb](https://github.com/codixor/rust-mis
 
 ## Releases
 
-Bump the package version in `Cargo.toml` and refresh both Cargo lockfiles. Pushing to `main` or pushing a matching `v<version>` tag runs the checks and publishes the new version through the GitHub `cratesio` environment. The workflow creates the matching GitHub release and tag. Further pushes with an already released version skip publication.
+Bump `workspace.package.version`, the three internal dependency pins, and the fuzz manifest's rs-yaml requirement when crossing a compatibility boundary. Refresh both lockfiles. All four published packages share the release version. Pushing to `main` or pushing a matching `v<version>` tag runs the checks and publishes the core, linter and parallel forks followed by rs-yaml through the GitHub `cratesio` environment. The workflow creates the matching GitHub release and tag. Further pushes with an already released version skip publication.

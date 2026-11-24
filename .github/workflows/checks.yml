@@ -22,7 +22,21 @@ jobs:
             cargo clippy --locked --all-targets $flags -- -D warnings
             cargo test --locked $flags
           done
-      - run: cargo doc --locked --all-features --no-deps
+      - name: Check parser resolution in both lockfiles
+        run: |
+          python3 - <<'PY'
+          import tomllib
+          for path in ["Cargo.lock", "fuzz/Cargo.lock"]:
+              with open(path, "rb") as lock:
+                  versions = [p["version"] for p in tomllib.load(lock)["package"] if p["name"] == "saphyr-parser"]
+              if len(versions) != 1 or not versions[0].startswith("0.4."):
+                  raise SystemExit(f"{path}: unexpected saphyr-parser versions {versions}")
+          PY
+      - name: Test the maintained forks
+        run: |
+          cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+          cargo test --workspace --all-features --locked
+      - run: cargo doc --workspace --locked --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
       - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2

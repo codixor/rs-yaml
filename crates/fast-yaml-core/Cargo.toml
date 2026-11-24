@@ -1,0 +1,46 @@
+[package]
+name = "codixor-fast-yaml-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Codixor fork of fast-yaml-core for rs-yaml. Core YAML 1.2.2 parser and emitter"
+readme = "README.md"
+keywords = ["yaml", "parser", "yaml12", "emitter"]
+categories = ["parsing", "encoding"]
+
+[lib]
+name = "fast_yaml_core"
+
+[features]
+default = []
+arena = ["bumpalo"]
+
+[dependencies]
+bumpalo = { workspace = true, optional = true, features = ["collections"] }
+memchr = { workspace = true }
+indexmap = { workspace = true }
+saphyr-parser = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["fs", "std"] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+indoc = { workspace = true }
+peak_alloc = { workspace = true }
+proptest = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "arena_benchmark"
+harness = false
+
+[[bench]]
+name = "input_value_benchmark"
+harness = false
+
+[lints]
+workspace = true

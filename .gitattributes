@@ -1,0 +1,3 @@
+# Preserve upstream byte-for-byte corpus data, including intentional lint violations.
+crates/*/tests/fixtures/** -text -whitespace
+crates/*/tests/golden/** -text -whitespace

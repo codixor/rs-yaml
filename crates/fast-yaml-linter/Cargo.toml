@@ -1,0 +1,44 @@
+[package]
+name = "codixor-fast-yaml-linter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Codixor fork of fast-yaml-linter for rs-yaml. YAML linter with rich diagnostics"
+readme = "README.md"
+keywords = ["yaml", "lint", "linter", "validation"]
+categories = ["development-tools", "parsing"]
+
+[dependencies]
+fast-yaml-core = { workspace = true }
+ignore = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, optional = true }
+serde_norway = { workspace = true }
+serde_path_to_error = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+indoc = { workspace = true }
+jsonschema = { workspace = true }
+peak_alloc = { workspace = true }
+saphyr-parser = { workspace = true }
+tempfile = { workspace = true }
+
+[lib]
+name = "fast_yaml_linter"
+
+[features]
+default = []
+json-output = ["dep:serde_json"]
+sarif-output = ["dep:serde_json"]
+all-formats = ["json-output", "sarif-output"]
+
+[[test]]
+name = "sarif_schema"
+required-features = ["sarif-output"]
+
+[lints]
+workspace = true

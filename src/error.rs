@@ -88,6 +88,10 @@ impl From<saphyr::ScanError> for ParseError {
         // Only fixed diagnostics cross the API boundary. Other scanner errors may
         // interpolate a tag, directive or part of the input.
         let reason = match error.info() {
+            "recursion limit exceeded" => return Self::ResourceLimit("flow collection nesting"),
+            "alias expansion exceeded the maximum node budget (possible billion-laughs attack)" => {
+                return Self::ResourceLimit("alias expansion node budget");
+            }
             safe @ ("while parsing node, found unknown anchor"
             | "while parsing a node, did not find expected node content"
             | "while parsing a block mapping, did not find expected key"

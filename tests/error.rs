@@ -52,3 +52,34 @@ fn duplicate_mapping_key_validation_is_scoped_per_mapping() {
     Parser::validate_no_duplicate_mapping_keys("left:\n  title: One\nright:\n  title: Two\n")
         .unwrap();
 }
+
+#[test]
+fn flow_nesting_limit_is_reported_as_a_limit() {
+    let input = format!("{}0{}", "[".repeat(256), "]".repeat(256));
+    assert!(matches!(
+        safe_load(&input),
+        Err(ParseError::ResourceLimit(_))
+    ));
+}
+
+#[test]
+fn upstream_alias_budget_is_reported_as_a_limit() {
+    use saphyr::{YamlLoader, YamlOwned};
+    use saphyr_parser::{BufferedInput, SpannedEventReceiver};
+
+    let mut loader = YamlLoader::<YamlOwned>::default();
+    loader.alias_limit(1);
+    let input = "item: &item [one, two]\ncopy: *item";
+    for pair in saphyr_parser::Parser::new(BufferedInput::new(input.chars())) {
+        let (event, span) = pair.unwrap();
+        loader.on_event(event, span);
+        if let Some(error) = loader.error() {
+            assert!(matches!(
+                ParseError::from(error.clone()),
+                ParseError::ResourceLimit(_)
+            ));
+            return;
+        }
+    }
+    panic!("the configured alias budget should be reached");
+}

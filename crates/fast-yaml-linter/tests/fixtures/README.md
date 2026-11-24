@@ -1,0 +1,104 @@
+# Linter Test Fixtures
+
+This directory contains YAML test fixtures for the fast-yaml-linter integration tests.
+
+## Directory Structure
+
+```
+fixtures/
+├── valid/           # Files that should pass all linting rules
+├── invalid/         # Files with known violations
+├── edge_cases/      # Edge case files for special scenarios
+├── linter/          # Scanner and multi-document inputs (flow, BOM, CRLF, broken syntax)
+├── yamllint/        # Inputs compared against yamllint output
+├── directives/      # Inline `# fy:` / `# yamllint` directive inputs
+├── config/          # Valid and invalid config files
+└── sarif/           # SARIF 2.1.0 JSON schema
+```
+
+## Valid Fixtures
+
+These files contain valid YAML that should pass all linting rules with default configuration.
+
+| File | Description |
+|------|-------------|
+| `valid/simple.yaml` | Simple flat YAML structure with basic types |
+| `valid/complex.yaml` | Complex nested structures with arrays and objects |
+| `valid/comments.yaml` | Proper comment formatting and placement |
+
+## Invalid Fixtures
+
+These files contain intentional violations for testing specific linting rules.
+
+| File | Rule Tested | Expected Violations |
+|------|-------------|---------------------|
+| `invalid/duplicate_keys.yaml` | duplicate-key | 3 (duplicate 'name', 'id', 'port') |
+| `invalid/long_lines.yaml` | line-length | 3 (lines exceeding 80 chars) |
+| `invalid/bad_indentation.yaml` | indentation | 4 (inconsistent spacing) |
+| `invalid/trailing_whitespace.yaml` | trailing-whitespace | 5 (lines with trailing spaces) |
+| `invalid/empty_values.yaml` | empty-values | 4 (keys with empty values) |
+| `invalid/bad_comments.yaml` | comments | 4 (missing spaces in comments) |
+| `invalid/octal_values.yaml` | octal-values | 3 (values with leading zeros) |
+
+## Edge Cases
+
+These files test edge cases and special YAML features.
+
+| File | Description |
+|------|-------------|
+| `edge_cases/empty.yaml` | Empty document (only comments) |
+| `edge_cases/unicode.yaml` | Unicode characters, emojis, RTL text |
+| `edge_cases/multiline.yaml` | Block scalars (literal, folded, various chomping) |
+| `edge_cases/non_ascii_block_scalar_braces.yaml` | Non-ASCII comment before a literal block containing `}` (issue #302) |
+| `edge_cases/commas_block_context.yaml` | Commas in block context are not flow commas (issue #442) |
+| `edge_cases/comments_verbatim_tag.yaml` | `#` inside a verbatim tag is not a comment (issue #445) |
+| `edge_cases/commas_unterminated_verbatim_tag.yaml` | Unterminated verbatim tag does not mask a real comma (issue #446) |
+
+## Usage in Tests
+
+Fixtures are loaded using `include_str!` macro in integration tests:
+
+```rust
+#[test]
+fn test_fixture_duplicate_keys() {
+    let yaml = include_str!("fixtures/invalid/duplicate_keys.yaml");
+    let linter = Linter::with_all_rules();
+    let diagnostics = linter.lint(yaml).unwrap();
+
+    let dup_key_errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.code.as_str() == "duplicate-key")
+        .collect();
+
+    assert_eq!(dup_key_errors.len(), 3);
+}
+```
+
+## Adding New Fixtures
+
+When adding new fixtures:
+
+1. Add descriptive comments at the top indicating what rule is tested
+2. Document expected violations count
+3. Add inline comments marking specific violations
+4. Update this README with the new fixture information
+5. Add corresponding test in `tests/fixture_tests.rs`
+
+Example:
+
+```yaml
+# Test: new_rule_name
+# Expected violations: 2
+
+valid_key: value
+invalid_key: bad_value  # violation: reason
+another_invalid: oops   # violation: reason
+```
+
+## Testing Best Practices
+
+- Each fixture should test a single rule or related set of rules
+- Include both positive (should pass) and negative (should fail) cases
+- Use realistic YAML content similar to actual use cases
+- Document expected behavior clearly in comments
+- Keep fixtures focused and minimal while still being meaningful

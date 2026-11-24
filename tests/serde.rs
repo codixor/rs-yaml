@@ -75,3 +75,16 @@ fn custom_serializers_cannot_emit_duplicate_keys_or_leak_their_errors() {
     let error = to_string(&Refuse).unwrap_err();
     assert!(!format!("{error} {error:?}").contains("private-fixture-marker"));
 }
+
+#[test]
+fn unix_file_mode_spelling_for_u32() {
+    #[derive(Deserialize)]
+    struct Config {
+        mode: u32,
+    }
+
+    assert!(from_str::<Config>("mode: 0600").is_err());
+    for yaml in ["mode: 0o600", "mode: 384"] {
+        assert_eq!(from_str::<Config>(yaml).unwrap().mode, 0o600);
+    }
+}

@@ -8,7 +8,7 @@ The standalone import was reviewed on 2026-11-24 using the ECC security-review c
 | Serialization | Rewriting float spellings in completed text could change user data. Float spellings are now chosen on scalar nodes. Flow keys use the scalar serializer, block-style representations are handled before reaching Saphyr's emitter, and recursive emission has a depth check. |
 | Streaming formatting | Both adapters call fast-yaml-core's guarded event formatters. They check input byte length first. Comments are discarded, and callers can detect them beforehand. |
 | Dependencies | Both Cargo graphs have lockfiles and a cargo-deny policy for RustSec advisories, yanked packages, approved licenses, crate sources and version constraints. The original Saphyr value API and the upstream Rust API use different parser versions. |
-| Repository and CI | First-party Rust forbids unsafe code. Actions are pinned to commit hashes, checkout discards credentials, and the workflow requests read-only contents access. A redacted Gitleaks scan covers the imported Git history before public push. |
+| Repository and CI | First-party Rust forbids unsafe code. Actions are pinned to commit hashes, checkout discards credentials, and checks use read-only contents access. The release job can create tags and releases. Only its Cargo publication step receives the crates.io environment token. A redacted Gitleaks scan covers the imported Git history before public push. |
 
 ## Boundaries
 

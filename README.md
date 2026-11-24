@@ -4,7 +4,7 @@ A Rust 1.100 library for parsing, emitting, formatting and linting YAML. The com
 
 ```toml
 [dependencies]
-rs-yaml = { git = "https://github.com/codixor/rs-yaml" }
+rs-yaml = "0.1.1"
 ```
 
 ```rust
@@ -36,3 +36,7 @@ Compatibility loaders cap each input at 8 MiB, expanded nesting at 64 nodes, str
 Run `bash scripts/validate.sh` or use Cargo directly. CI tests default, minimal and all-feature builds on Rust 1.100, runs Clippy with warnings denied, checks both dependency graphs with cargo-deny and exercises two bounded AddressSanitizer fuzz targets on a pinned nightly. The Criterion suite is available through `bash scripts/bench.sh`.
 
 Imported from [codixor/rust-misc at ae68abb](https://github.com/codixor/rust-misc/tree/ae68abb54c655a8fcc009123fbc31821b82435e4/rs-yaml). The original design incorporates work by the fast-yaml contributors. Both projects use the MIT or Apache-2.0 license at your option.
+
+## Releases
+
+Bump the package version in `Cargo.toml` and refresh both Cargo lockfiles. Pushing to `main` or pushing a matching `v<version>` tag runs the checks and publishes the new version through the GitHub `cratesio` environment. The workflow creates the matching GitHub release and tag. Further pushes with an already released version skip publication.

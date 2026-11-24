@@ -156,3 +156,23 @@ fn parse_marked_str_preserves_nested_source_spans() {
     assert_eq!(title_value.span.start.line(), 2);
     assert!(title_value.span.start.col() > title_key.span.start.col());
 }
+
+#[test]
+fn loading_duplicate_keys_keeps_last_value_and_validation_remains_opt_in() {
+    let text = "key: old\nkey: new\n";
+    let value = Parser::parse_str(text).unwrap();
+    let map = value.as_mapping().unwrap();
+    assert_eq!(map.len(), 1);
+    assert_eq!(map_value(map, "key").as_str(), Some("new"));
+    assert!(Parser::validate_no_duplicate_mapping_keys(text).is_err());
+}
+
+#[test]
+fn marked_block_scalar_span_starts_at_the_indicator() {
+    let value = Parser::parse_marked_str("key: |\n  content\n").unwrap();
+    let YamlDataOwned::Mapping(map) = value.data else {
+        panic!("expected a mapping");
+    };
+    let (_, scalar) = map.iter().next().unwrap();
+    assert_eq!(scalar.span.start.index(), 5);
+}

@@ -1,6 +1,6 @@
 # rs-yaml
 
-A Rust 1.100 library for parsing, emitting, formatting and linting YAML. The original `rs-yaml` API retains its Saphyr value types, source spans, and empty-document behavior. The standalone crate also exposes the Rust libraries from [fast-yaml](https://github.com/bug-ops/fast-yaml).
+A Rust 1.100 library for parsing, emitting, formatting and linting YAML. The compatibility API re-exports Saphyr 0.4 value and span types. Callers that also name those types through a direct Saphyr dependency should use the 0.4 series. Marked block scalar spans start at the `|` or `>` indicator. The standalone crate also exposes the Rust libraries from [fast-yaml](https://github.com/bug-ops/fast-yaml).
 
 ```toml
 [dependencies]

@@ -2,7 +2,7 @@ use std::{borrow::Cow, collections::BTreeMap};
 
 use crate::error::{ParseError, ParseResult};
 use crate::value::{MarkedValue, Value, YamlDataOwned};
-use saphyr::{MappingOwned, ScalarOwned, Tag, YamlLoader, parse_core_schema_fp};
+use saphyr::{LoadableYamlNode, MappingOwned, ScalarOwned, Tag, YamlLoader, parse_core_schema_fp};
 use saphyr_parser::{Event, Span, SpannedEventReceiver};
 
 /// Parser for YAML documents.
@@ -110,7 +110,7 @@ impl Parser {
     ///
     /// Returns [`ParseError`] if the YAML syntax is invalid.
     pub fn parse_all_marked(input: &str) -> ParseResult<Vec<MarkedValue>> {
-        load_marked_documents_preserving_styles(input)
+        load_documents_preserving_styles(input)
     }
 
     /// Parse all YAML documents preserving scalar styles (literal `|`, folded `>`).
@@ -186,23 +186,29 @@ fn normalize_value(value: Value) -> ParseResult<Value> {
     }
 }
 
-fn load_documents_preserving_styles(input: &str) -> ParseResult<Vec<Value>> {
-    let mut loader = YamlLoader::<Value>::default();
+fn load_documents_preserving_styles<'a, Node: LoadableYamlNode<'a>>(
+    input: &'a str,
+) -> ParseResult<Vec<Node>> {
+    let mut loader = YamlLoader::<Node>::default();
     loader.early_parse(false);
-    crate::load_guard::load(input, &mut loader)?;
-    Ok(loader.into_documents())
-}
-
-fn load_marked_documents_preserving_styles(input: &str) -> ParseResult<Vec<MarkedValue>> {
-    let mut loader = YamlLoader::<MarkedValue>::default();
-    loader.early_parse(false);
-    crate::load_guard::load(input, &mut loader)?;
+    // The compatibility API keeps the last value; duplicate validation is opt-in.
+    loader.allow_duplicate_keys(true);
+    crate::load_guard::load(input, |event, span| {
+        loader.on_event(event, span);
+        if let Some(error) = loader.error() {
+            return Err(ParseError::Scanner(error.clone()));
+        }
+        Ok(())
+    })?;
     Ok(loader.into_documents())
 }
 
 fn reject_duplicate_mapping_keys(input: &str) -> ParseResult<()> {
     let mut detector = DuplicateKeyDetector::default();
-    crate::load_guard::load(input, &mut detector)?;
+    crate::load_guard::load(input, |event, span| {
+        detector.on_event(event, span);
+        Ok(())
+    })?;
     detector.finish()
 }
 

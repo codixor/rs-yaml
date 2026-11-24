@@ -1,6 +1,6 @@
 //! Account for nodes before handing them to the compatibility loader, which clones anchors.
 use crate::{ParseError, ParseResult};
-use saphyr_parser::{BufferedInput, Event, Parser, SpannedEventReceiver, Tag};
+use saphyr_parser::{BufferedInput, Event, Parser, Span, Tag};
 use std::collections::HashMap;
 
 pub(crate) const MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
@@ -102,7 +102,7 @@ impl Budget {
 
 pub(crate) fn load<'a>(
     input: &'a str,
-    receiver: &mut impl SpannedEventReceiver<'a>,
+    mut receive: impl FnMut(Event<'a>, Span) -> ParseResult<()>,
 ) -> ParseResult<()> {
     if input.len() > MAX_INPUT_BYTES {
         return Err(ParseError::ResourceLimit("input bytes"));
@@ -111,7 +111,7 @@ pub(crate) fn load<'a>(
     for result in Parser::new(BufferedInput::new(input.chars())) {
         let (event, span) = result?;
         budget.observe(&event)?;
-        receiver.on_event(event, span);
+        receive(event, span)?;
     }
     Ok(())
 }

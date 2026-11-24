@@ -171,7 +171,7 @@ impl Emitter {
 
             // Apply saphyr native configuration
             emitter.compact(config.compact);
-            emitter.multiline_strings(config.multiline_strings);
+            emitter.multiline(config.multiline_strings);
 
             // Convert YamlOwned to Yaml for emission
             let yaml_borrowed = Self::emission_node(value, 0)?;

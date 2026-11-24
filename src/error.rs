@@ -3,6 +3,14 @@ use thiserror::Error;
 /// Errors that can occur during YAML parsing.
 #[derive(Error, Debug)]
 pub enum ParseError {
+    /// The compatibility loader reached a resource bound.
+    #[error("YAML resource limit exceeded: {0}")]
+    ResourceLimit(&'static str),
+
+    /// The alias refers to an unknown or still-open anchor.
+    #[error("YAML alias must refer to a completed anchor in this document")]
+    UnresolvedAlias,
+
     /// YAML syntax error with location information.
     #[error("YAML parse error at line {line}, column {column}: {message}")]
     Syntax {

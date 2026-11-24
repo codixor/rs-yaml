@@ -2,9 +2,9 @@ use std::fmt::Write as _;
 
 use crate::error::{EmitError, EmitResult};
 use crate::value::Value;
-use memchr::memmem;
-use saphyr::{ScalarOwned, YamlEmitter};
+use saphyr::{Scalar, Yaml, YamlEmitter};
 use saphyr_parser::ScalarStyle;
+use std::borrow::Cow;
 
 /// Configuration for YAML emission.
 ///
@@ -69,6 +69,19 @@ impl Default for EmitterConfig {
 }
 
 impl EmitterConfig {
+    #[cfg(feature = "streaming")]
+    pub(crate) fn upstream(&self) -> EmitResult<fast_yaml_core::EmitterConfig> {
+        let indent = fast_yaml_core::Indent::new(self.indent.clamp(1, 9))
+            .map_err(|e| EmitError::Emit(e.to_string()))?;
+        Ok(fast_yaml_core::EmitterConfig::new()
+            .with_indent(indent)
+            .with_layout(fast_yaml_core::Layout::from_flow_flag(
+                self.default_flow_style,
+            ))
+            .with_explicit_start(self.explicit_start)
+            .with_multiline_strings(self.multiline_strings))
+    }
+
     /// Create a new emitter configuration with default values.
     #[must_use]
     pub fn new() -> Self {
@@ -144,7 +157,7 @@ impl Emitter {
     pub fn emit_str_with_config(value: &Value, config: &EmitterConfig) -> EmitResult<String> {
         // When flow style is requested, use the custom path that renders {k: v} / [a, b].
         if config.default_flow_style == Some(true) {
-            let raw = Self::emit_flow(value)?;
+            let raw = Self::emit_flow(value, 0)?;
             let mut output = Self::apply_formatting(raw, config);
             if !output.is_empty() && !output.ends_with('\n') {
                 output.push('\n');
@@ -152,8 +165,7 @@ impl Emitter {
             return Ok(output);
         }
 
-        let estimated_size = Self::estimate_output_size(value);
-        let mut output = String::with_capacity(estimated_size);
+        let mut output = String::new();
         {
             let mut emitter = YamlEmitter::new(&mut output);
 
@@ -162,7 +174,7 @@ impl Emitter {
             emitter.multiline_strings(config.multiline_strings);
 
             // Convert YamlOwned to Yaml for emission
-            let yaml_borrowed: saphyr::Yaml = value.into();
+            let yaml_borrowed = Self::emission_node(value, 0)?;
             emitter
                 .dump(&yaml_borrowed)
                 .map_err(|e| EmitError::Emit(e.to_string()))?;
@@ -179,50 +191,79 @@ impl Emitter {
         Ok(output)
     }
 
-    /// Estimate output size based on input value structure.
-    fn estimate_output_size(value: &Value) -> usize {
-        Self::estimate_value_size(value)
-    }
-
-    fn estimate_value_size(value: &Value) -> usize {
-        match value {
-            Value::Value(scalar) => Self::estimate_scalar_size(scalar),
-            Value::Sequence(seq) => {
-                // "- " prefix (2) + newline (1) per item + recursive content
-                seq.iter().map(|v| 3 + Self::estimate_value_size(v)).sum()
-            }
-            Value::Mapping(map) => {
-                // "key: " (~10) + newline (1) + recursive content
-                map.iter()
-                    .map(|(k, v)| 11 + Self::estimate_value_size(k) + Self::estimate_value_size(v))
-                    .sum()
-            }
-            Value::Representation(s, _, _) => s.len() + 2,
-            Value::Tagged(_, inner) => 10 + Self::estimate_value_size(inner),
-            Value::Alias(_) => 10,
-            Value::BadValue => 4,
-        }
-    }
-
-    fn estimate_scalar_size(scalar: &ScalarOwned) -> usize {
-        match scalar {
-            ScalarOwned::Null => 4,       // "null"
-            ScalarOwned::Boolean(_) => 5, // "false"
-            ScalarOwned::Integer(i) => {
-                // Decimal digits + sign (max 20 for i64)
-                if *i == 0 {
-                    1
+    // Prepare scalar spellings before serializing. Rewriting completed YAML can change
+    // user strings and block contents that happen to spell a special floating-point value.
+    fn emission_node(value: &Value, depth: usize) -> EmitResult<Yaml<'_>> {
+        Self::check_depth(depth)?;
+        Ok(match value {
+            Value::Value(scalar) => Self::emission_scalar(scalar.into()),
+            Value::Representation(text, style, tag) => {
+                let scalar = if *style == ScalarStyle::Plain && tag.is_none() {
+                    Scalar::parse_from_cow(Cow::Borrowed(text))
                 } else {
-                    // Use checked_ilog10 for precise digit count without float conversion
-                    i.unsigned_abs()
-                        .checked_ilog10()
-                        .map_or(1, |d| d as usize + 1)
-                        + 1
+                    Scalar::String(Cow::Borrowed(text))
+                };
+                let node = Self::emission_scalar(scalar);
+                match tag {
+                    Some(tag) => Yaml::Tagged(Cow::Borrowed(tag), Box::new(node)),
+                    None => node,
                 }
             }
-            ScalarOwned::FloatingPoint(_) => 20, // Conservative estimate
-            ScalarOwned::String(s) => s.len() + 2, // Possible quotes
+            Value::Tagged(tag, inner) => Yaml::Tagged(
+                Cow::Borrowed(tag),
+                Box::new(Self::emission_node(inner, depth + 1)?),
+            ),
+            Value::Sequence(items) => Yaml::Sequence(
+                items
+                    .iter()
+                    .map(|item| Self::emission_node(item, depth + 1))
+                    .collect::<EmitResult<_>>()?,
+            ),
+            Value::Mapping(items) => Yaml::Mapping(
+                items
+                    .iter()
+                    .map(|(k, v)| {
+                        Ok((
+                            Self::emission_node(k, depth + 1)?,
+                            Self::emission_node(v, depth + 1)?,
+                        ))
+                    })
+                    .collect::<EmitResult<_>>()?,
+            ),
+            Value::BadValue => Yaml::BadValue,
+            Value::Alias(_) => {
+                return Err(EmitError::UnsupportedType(
+                    "alias without an anchor definition".into(),
+                ));
+            }
+        })
+    }
+
+    fn emission_scalar(scalar: Scalar<'_>) -> Yaml<'_> {
+        if let Scalar::FloatingPoint(value) = scalar {
+            let value = value.0;
+            let text = if value.is_nan() {
+                Cow::Borrowed(".nan")
+            } else if value == f64::INFINITY {
+                Cow::Borrowed(".inf")
+            } else if value == f64::NEG_INFINITY {
+                Cow::Borrowed("-.inf")
+            } else {
+                Cow::Owned(format!("{value:?}"))
+            };
+            Yaml::Representation(text, ScalarStyle::Plain, None)
+        } else {
+            Yaml::Value(scalar)
         }
+    }
+
+    fn check_depth(depth: usize) -> EmitResult<()> {
+        if depth >= crate::load_guard::MAX_DEPTH {
+            return Err(EmitError::Emit(
+                "value exceeds maximum nesting depth".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Emit a single YAML document to a string with default configuration.
@@ -265,11 +306,7 @@ impl Emitter {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn emit_all_with_config(values: &[Value], config: &EmitterConfig) -> EmitResult<String> {
-        // Pre-calculate total estimated size for all documents
-        let total_size: usize =
-            values.iter().map(Self::estimate_output_size).sum::<usize>() + values.len() * 5; // Account for "---\n" separators
-
-        let mut output = String::with_capacity(total_size);
+        let mut output = String::new();
 
         // Create single config variant for non-first documents (avoids cloning per document)
         let inner_config = EmitterConfig {
@@ -326,106 +363,25 @@ impl Emitter {
     fn apply_formatting(mut output: String, config: &EmitterConfig) -> String {
         // Handle explicit_start
         if config.explicit_start {
-            if !output.starts_with("---") {
+            if !output.starts_with("---\n") {
                 output.insert_str(0, "---\n");
             }
         } else if output.starts_with("---\n") {
             output.drain(..4);
-        } else if output.starts_with("---") {
-            // Find where content starts after "---"
-            let skip = 3 + output[3..].chars().take_while(|c| *c == '\n').count();
-            output.drain(..skip);
         }
-
-        // Fix special float values for YAML 1.2 Core Schema compliance
-        // saphyr outputs "inf"/"-inf"/"NaN", but YAML 1.2 requires ".inf"/"-.inf"/".nan"
-        output = Self::fix_special_floats(&output);
 
         // Re-indent when caller requests a width other than saphyr's fixed 2 spaces.
         if config.indent != 2 {
-            output = Self::reindent(&output, config.indent);
+            output = Self::reindent(&output, config.indent.clamp(1, 9));
         }
 
         output
     }
 
-    /// Fix special float values for YAML 1.2 Core Schema compliance.
-    ///
-    /// Converts saphyr's output format to YAML 1.2 compliant format:
-    /// - `inf` → `.inf`
-    /// - `-inf` → `-.inf`
-    /// - `NaN` → `.nan`
-    fn fix_special_floats(output: &str) -> String {
-        if !Self::might_contain_special_floats(output) {
-            return output.to_string();
-        }
-
-        // Slow path: line-by-line transformation
-        Self::fix_special_floats_slow(output)
-    }
-
-    /// Quick check if output might contain special float patterns.
-    /// Uses SIMD-accelerated memchr for speed - no regex or allocation.
-    #[inline]
-    fn might_contain_special_floats(output: &str) -> bool {
-        let bytes = output.as_bytes();
-
-        // Use SIMD-accelerated memmem for fast substring search
-        // These are the only special float indicators in saphyr output
-        memmem::find(bytes, b"inf").is_some() || memmem::find(bytes, b"NaN").is_some()
-    }
-
-    /// Slow path for `fix_special_floats`: processes line-by-line.
-    /// Pre-allocates output buffer to avoid reallocations.
-    fn fix_special_floats_slow(output: &str) -> String {
-        // Pre-allocate output (same size as input since patterns are similar length)
-        let mut result = String::with_capacity(output.len());
-
-        for (i, line) in output.lines().enumerate() {
-            if i > 0 {
-                result.push('\n');
-            }
-
-            // Check if line ends with special float value (with optional whitespace)
-            let trimmed = line.trim_end();
-            if let Some(prefix) = trimmed.strip_suffix("inf") {
-                // Check if it's "-inf" or standalone "inf"
-                if let Some(before_minus) = prefix.strip_suffix('-') {
-                    // Already has minus, check if it's at value position
-                    if Self::is_value_position(before_minus) {
-                        result.push_str(before_minus);
-                        result.push_str("-.inf");
-                        continue;
-                    }
-                } else if Self::is_value_position(prefix) {
-                    result.push_str(prefix);
-                    result.push_str(".inf");
-                    continue;
-                }
-            } else if let Some(prefix) = trimmed.strip_suffix("NaN")
-                && Self::is_value_position(prefix)
-            {
-                result.push_str(prefix);
-                result.push_str(".nan");
-                continue;
-            }
-            result.push_str(line);
-        }
-
-        result
-    }
-
-    /// Check if the prefix indicates this is a value position (after `: ` or start of line).
-    fn is_value_position(prefix: &str) -> bool {
-        prefix.is_empty()
-            || prefix.ends_with(": ")
-            || prefix.ends_with("- ")
-            || prefix.ends_with('\n')
-    }
-
     /// Extract `%YAML` and `%TAG` directive lines that appear before the first `---`.
     ///
     /// Returns the directive block (with a trailing newline) or an empty string.
+    #[cfg(not(feature = "streaming"))]
     fn extract_directives(input: &str) -> String {
         let mut directives = String::new();
         for line in input.lines() {
@@ -466,32 +422,21 @@ impl Emitter {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn format_with_config(input: &str, config: &EmitterConfig) -> EmitResult<String> {
-        // Extract %YAML / %TAG directives before formatting; the streaming
-        // formatter (and DOM fallback) silently drops them.
-        let directives = Self::extract_directives(input);
-
-        // Always prefer the streaming formatter when available.
-        //
-        // The DOM-based path (saphyr's YamlEmitter) quotes YAML 1.1 boolean-like
-        // keys (`on`, `off`, `yes`, `no`) even though they are plain strings in
-        // YAML 1.2.2 Core Schema. The streaming formatter preserves the original
-        // ScalarStyle from the parser, so it never introduces spurious quoting.
-        #[cfg(all(feature = "streaming", feature = "arena"))]
+        #[cfg(feature = "arena")]
         {
-            let formatted = crate::streaming::format_streaming_arena(input, config)?;
-            Ok(Self::prepend_directives(&directives, formatted))
+            crate::streaming::format_streaming_arena(input, config)
         }
 
         #[cfg(all(feature = "streaming", not(feature = "arena")))]
         {
-            let formatted = crate::streaming::format_streaming(input, config)?;
-            Ok(Self::prepend_directives(&directives, formatted))
+            crate::streaming::format_streaming(input, config)
         }
 
         // Non-streaming fallback: parse with early_parse=false to preserve block scalar styles
         // (literal | and folded >) instead of converting them to double-quoted strings.
         #[cfg(not(feature = "streaming"))]
         {
+            let directives = Self::extract_directives(input);
             let docs = crate::Parser::parse_all_preserving_styles(input)
                 .map_err(|e| EmitError::Emit(e.to_string()))?;
             if docs.is_empty() {
@@ -499,6 +444,7 @@ impl Emitter {
             }
             let inner_config = EmitterConfig {
                 explicit_start: false,
+                indent: config.indent.clamp(1, 9),
                 ..*config
             };
             let mut output = String::new();
@@ -523,6 +469,7 @@ impl Emitter {
     ///
     /// If `directives` is non-empty, inserts them before the first `---` line
     /// or at the beginning of the output.
+    #[cfg(not(feature = "streaming"))]
     fn prepend_directives(directives: &str, formatted: String) -> String {
         if directives.is_empty() {
             return formatted;
@@ -652,43 +599,12 @@ impl Emitter {
     }
 
     /// Emit a scalar key as an inline string (no trailing newline).
+    #[cfg(any(test, not(feature = "streaming")))]
     fn emit_scalar_inline(value: &Value) -> EmitResult<String> {
         match value {
-            Value::Representation(s, ScalarStyle::SingleQuoted, _) => Ok(format!("'{s}'")),
-            Value::Representation(s, ScalarStyle::DoubleQuoted, _) => Ok(format!("\"{s}\"")),
-            Value::Representation(s, _, _) => Ok(s.clone()),
-            Value::Value(scalar) => match scalar {
-                ScalarOwned::Null => Ok("null".to_string()),
-                ScalarOwned::Boolean(b) => Ok(if *b { "true" } else { "false" }.to_string()),
-                ScalarOwned::Integer(i) => Ok(i.to_string()),
-                ScalarOwned::FloatingPoint(f) => {
-                    let s = f.to_string();
-                    // Ensure the output is recognisable as a float (YAML Core Schema).
-                    // Rust formats e.g. `1.0` as `"1"` and `1.23e10` as `"12300000000"`.
-                    // Append `.0` when the string contains no decimal point or exponent and
-                    // is not a special value (inf / NaN handled by fix_special_floats).
-                    if s.contains('.')
-                        || s.contains('e')
-                        || s.contains('E')
-                        || s.eq_ignore_ascii_case("inf")
-                        || s.eq_ignore_ascii_case("-inf")
-                        || s.eq_ignore_ascii_case("nan")
-                    {
-                        Ok(s)
-                    } else {
-                        Ok(format!("{s}.0"))
-                    }
-                }
-                ScalarOwned::String(s) => {
-                    if s.contains(':') || s.contains('#') || s.is_empty() {
-                        Ok(format!("\"{s}\""))
-                    } else {
-                        Ok(s.clone())
-                    }
-                }
-            },
+            Value::Value(_) | Value::Representation(..) => Self::emit_value_inline(value),
             _ => Err(EmitError::UnsupportedType(
-                "complex key not supported".to_string(),
+                "complex key not supported here".into(),
             )),
         }
     }
@@ -699,7 +615,7 @@ impl Emitter {
         {
             let mut emitter = YamlEmitter::new(&mut out);
             emitter.compact(true);
-            let yaml: saphyr::Yaml = value.into();
+            let yaml = Self::emission_node(value, 0)?;
             emitter
                 .dump(&yaml)
                 .map_err(|e| EmitError::Emit(e.to_string()))?;
@@ -754,7 +670,8 @@ impl Emitter {
     /// in flow style recursively.
     ///
     /// Returns a string without a leading `---\n` marker and without a trailing newline.
-    fn emit_flow(value: &Value) -> EmitResult<String> {
+    fn emit_flow(value: &Value, depth: usize) -> EmitResult<String> {
+        Self::check_depth(depth)?;
         match value {
             Value::Mapping(map) => {
                 let mut out = String::from("{");
@@ -762,8 +679,8 @@ impl Emitter {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    let key_str = Self::emit_scalar_inline(k)?;
-                    let val_str = Self::emit_flow(v)?;
+                    let key_str = Self::emit_flow(k, depth + 1)?;
+                    let val_str = Self::emit_flow(v, depth + 1)?;
                     write!(out, "{key_str}: {val_str}")
                         .map_err(|e| EmitError::Emit(e.to_string()))?;
                 }
@@ -776,7 +693,7 @@ impl Emitter {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    out.push_str(&Self::emit_flow(item)?);
+                    out.push_str(&Self::emit_flow(item, depth + 1)?);
                 }
                 out.push(']');
                 Ok(out)

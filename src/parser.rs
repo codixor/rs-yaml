@@ -3,7 +3,7 @@ use std::{borrow::Cow, collections::BTreeMap};
 use crate::error::{ParseError, ParseResult};
 use crate::value::{MarkedValue, Value, YamlDataOwned};
 use saphyr::{MappingOwned, ScalarOwned, Tag, YamlLoader, parse_core_schema_fp};
-use saphyr_parser::{BufferedInput, Event, Parser as SaphyrParser, Span, SpannedEventReceiver};
+use saphyr_parser::{Event, Span, SpannedEventReceiver};
 
 /// Parser for YAML documents.
 ///
@@ -187,25 +187,22 @@ fn normalize_value(value: Value) -> ParseResult<Value> {
 }
 
 fn load_documents_preserving_styles(input: &str) -> ParseResult<Vec<Value>> {
-    let mut saphyr_parser = SaphyrParser::new(BufferedInput::new(input.chars()));
     let mut loader = YamlLoader::<Value>::default();
     loader.early_parse(false);
-    saphyr_parser.load(&mut loader, true)?;
+    crate::load_guard::load(input, &mut loader)?;
     Ok(loader.into_documents())
 }
 
 fn load_marked_documents_preserving_styles(input: &str) -> ParseResult<Vec<MarkedValue>> {
-    let mut saphyr_parser = SaphyrParser::new(BufferedInput::new(input.chars()));
     let mut loader = YamlLoader::<MarkedValue>::default();
     loader.early_parse(false);
-    saphyr_parser.load(&mut loader, true)?;
+    crate::load_guard::load(input, &mut loader)?;
     Ok(loader.into_documents())
 }
 
 fn reject_duplicate_mapping_keys(input: &str) -> ParseResult<()> {
-    let mut saphyr_parser = SaphyrParser::new(BufferedInput::new(input.chars()));
     let mut detector = DuplicateKeyDetector::default();
-    saphyr_parser.load(&mut detector, true)?;
+    crate::load_guard::load(input, &mut detector)?;
     detector.finish()
 }
 
@@ -409,13 +406,13 @@ fn normalize_mapping(map: MappingOwned) -> ParseResult<Value> {
     let mut normalized = MappingOwned::new();
 
     for (raw_key, raw_value) in map {
-        let key = normalize_value(raw_key)?;
+        let merge = is_merge_key(&raw_key);
         let value = normalize_value(raw_value)?;
 
-        if is_merge_key(&key) {
-            apply_merge_value(&mut normalized, &value)?;
+        if merge {
+            apply_merge_value(&mut normalized, value)?;
         } else {
-            normalized.insert(key, value);
+            normalized.insert(normalize_value(raw_key)?, value);
         }
     }
 
@@ -548,11 +545,11 @@ fn parse_yaml_int(text: &str) -> Option<i64> {
 }
 
 fn is_merge_key(key: &Value) -> bool {
-    matches!(key, Value::Value(ScalarOwned::String(text)) if text == "<<")
-        || matches!(key, Value::Representation(text, _, _) if text == "<<")
+    matches!(key, Value::Representation(text, saphyr::ScalarStyle::Plain, None) if text == "<<")
+        || matches!(key, Value::Representation(_, _, Some(tag)) if tag.is_yaml_core_schema() && tag.suffix == "merge")
 }
 
-fn apply_merge_value(target: &mut MappingOwned, value: &Value) -> ParseResult<()> {
+fn apply_merge_value(target: &mut MappingOwned, value: Value) -> ParseResult<()> {
     match value {
         Value::Mapping(map) => {
             merge_mapping(target, map);
@@ -562,28 +559,26 @@ fn apply_merge_value(target: &mut MappingOwned, value: &Value) -> ParseResult<()
             for item in items {
                 match item {
                     Value::Mapping(map) => merge_mapping(target, map),
-                    Value::Tagged(_, inner) => apply_merge_value(target, inner)?,
+                    Value::Tagged(_, inner) => apply_merge_value(target, *inner)?,
                     other => {
                         return Err(ParseError::InvalidMergeValue {
-                            kind: value_kind(other),
+                            kind: value_kind(&other),
                         });
                     }
                 }
             }
             Ok(())
         }
-        Value::Tagged(_, inner) => apply_merge_value(target, inner),
+        Value::Tagged(_, inner) => apply_merge_value(target, *inner),
         other => Err(ParseError::InvalidMergeValue {
-            kind: value_kind(other),
+            kind: value_kind(&other),
         }),
     }
 }
 
-fn merge_mapping(target: &mut MappingOwned, source: &MappingOwned) {
+fn merge_mapping(target: &mut MappingOwned, source: MappingOwned) {
     for (key, value) in source {
-        if !target.contains_key(key) {
-            target.insert(key.clone(), value.clone());
-        }
+        target.entry(key).or_insert(value);
     }
 }
 

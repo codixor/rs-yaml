@@ -1,75 +1,38 @@
 # rs-yaml
 
-`rs-yaml` is the workspace YAML parser/emitter crate.
+A Rust 1.100 library for parsing, emitting, formatting and linting YAML. The original `rs-yaml` API retains its Saphyr value types, source spans, and empty-document behavior. The standalone crate also exposes the Rust libraries from [fast-yaml](https://github.com/bug-ops/fast-yaml).
 
-It stays library-first and intentionally small:
+```toml
+[dependencies]
+rs-yaml = { git = "https://github.com/codixor/rs-yaml" }
+```
 
-- `Parser`
-- `Emitter`
-- `Value`
-- `ParseError`
-- `EmitError`
-- convenience helpers `safe_load` and `safe_load_all`
+```rust
+use rs_yaml::{safe_dump, safe_load};
 
-The formatter path is additive, but the measured fast path is now the default:
+let doc = safe_load("project: rs-yaml\n")?;
+assert_eq!(doc.as_mapping().unwrap().len(), 1);
+assert_eq!(safe_load(&safe_dump(&doc)?)?, doc);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
-- default build: `streaming` formatter enabled
-- `--no-default-features`: DOM fallback path
-- `--features streaming,arena`: same public API, arena backend preferred for
-  formatting internals
+| API | Use |
+| --- | --- |
+| `Parser`, `Emitter`, `safe_load[_all]`, `safe_dump[_all]` | Read and write the original owned `Value` type. Marked parsing retains source spans. |
+| `decode_input`, `decode_input_owned` | Validate UTF-8 and distinguish unsupported byte encodings. |
+| `find_comments`, `has_comments` | Detect YAML comments and access their source ranges before formatting. The formatter discards comments. |
+| `fast` | Full fast-yaml-core 0.8 API, including guarded events, parsing limits, sets, arbitrary-size integers, merge policies and emission budgets. |
+| `lint` (feature `lint`) | Rule-based diagnostics, configurable rules, source locations and text, JSON and SARIF output. |
+| `parallel` (feature `parallel`) | Ordered multi-document parsing, worker limits and file batch operations. |
 
-## Current behavior guarantees
+The default `streaming` feature formats parser events directly. Enable `arena` for the arena-backed formatter. Disabling default features selects the legacy DOM formatter. The facade modules preserve upstream type identity. For example, `parallel::parse_parallel` returns `Vec<fast::Value>`. The compatibility parser uses a separate `rs_yaml::Value` and returns null for an empty stream.
 
-The crate now has explicit proof coverage for the high-value parser regressions:
+## Handling input
 
-- comment-only and truly empty documents load as YAML null
-- YAML merge keys `<<` are resolved during `safe_load`
-- explicit core tags like `!!int`, `!!float`, `!!bool`, and `!!null` override
-  quoted scalar style correctly
+Compatibility loaders cap each input at 8 MiB, expanded nesting at 64 nodes, streams at 4,096 documents, and estimated materialization work at 32 MiB. The estimate charges nodes, text, tags, stored anchors and alias copies. A limit violation returns `ParseError::ResourceLimit`. Use `fast::Parser::parse_all_with_limits` for configurable upstream budgets. Applications reading external files or requests should bound the incoming bytes before collecting them into a string.
 
-Formatting is intentionally documented as lossy for comments today. The
-formatter preserves directives and block scalar style, but it does not preserve
-comments yet.
+## Development
 
-## Examples
+Run `bash scripts/validate.sh` or use Cargo directly. CI tests default, minimal and all-feature builds on Rust 1.100, runs Clippy with warnings denied, checks both dependency graphs with cargo-deny and exercises two bounded AddressSanitizer fuzz targets on a pinned nightly. The Criterion suite is available through `bash scripts/bench.sh`.
 
-- `cargo run -p rs-yaml --example parse_document`
-- `cargo run -p rs-yaml --example emit_document`
-- `cargo run -p rs-yaml --example safe_load`
-- `cargo run -p rs-yaml --example format_document`
-- `cargo run -p rs-yaml --example streaming_format --features streaming`
-
-## Validation
-
-- `bash rs-yaml/scripts/validate.sh`
-- `bash rs-yaml/scripts/feature-matrix.sh`
-- `bash rs-yaml/scripts/bench.sh`
-
-## Benchmarks
-
-The Criterion surface covers:
-
-- parser hot paths
-- emitter hot paths
-- `safe_load` regression paths
-- formatter comparisons across DOM, streaming, and arena backends
-- direct `saphyr` baselines for parse and emit
-
-Current measured decision:
-
-- default streaming formatter improved `Emitter::format_with_config` by roughly
-  `34-41%` compared with the DOM/default fallback on the same fixture
-- arena formatting stayed only marginally faster than standard streaming, so it
-  remains optional instead of becoming a default dependency choice
-
-See [benches/README.md](./benches/README.md) for the bench entry points.
-
-## Interop rule
-
-Future `kdl` interop should follow the same rule we used for JSON:
-
-- keep a shared semantic bridge where it is truly lossless
-- keep any generated YAML-on-KDL contract additive
-- benchmark both paths before choosing the default long-term owner
-
-The execution roadmap lives in [PLAN.md](./PLAN.md).
+Imported from [codixor/rust-misc at ae68abb](https://github.com/codixor/rust-misc/tree/ae68abb54c655a8fcc009123fbc31821b82435e4/rs-yaml). The original design incorporates work by the fast-yaml contributors. Both projects use the MIT or Apache-2.0 license at your option.

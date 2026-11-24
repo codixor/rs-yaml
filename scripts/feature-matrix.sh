@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 cargo check -p rs-yaml --manifest-path "$ROOT/Cargo.toml"
 cargo check -p rs-yaml --no-default-features --manifest-path "$ROOT/Cargo.toml"

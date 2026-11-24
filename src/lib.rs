@@ -1,4 +1,5 @@
-//! `rs-yaml` is the workspace YAML parser and emitter crate.
+#![forbid(unsafe_code)]
+//! `rs-yaml` parses, emits and formats YAML.
 //!
 //! The public surface stays intentionally small:
 //! - value-first parsing
@@ -8,7 +9,7 @@
 //!
 //! # YAML 1.2.2 Compliance
 //!
-//! This library implements the YAML 1.2.2 specification with the Core Schema:
+//! The parser supports YAML core-schema scalars:
 //!
 //! - **Null**: `~`, `null`, `Null`, `NULL`, or empty value
 //! - **Boolean**: `true`/`false` (case-insensitive) - NOT yes/no/on/off (YAML 1.1)
@@ -39,6 +40,8 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod load_guard;
+
 /// YAML emitter for serializing documents to strings.
 pub mod emitter;
 /// Error types for parsing and emitting operations.
@@ -61,3 +64,28 @@ pub use parser::{Parser, canonicalize, safe_load, safe_load_all};
 pub use value::{
     Array, Map, MarkedValue, Marker, OrderedFloat, ScalarOwned, Span, Value, YamlDataOwned,
 };
+
+/// Upstream Rust API, including budgeted loading, events, scalar resolution and bounded emission.
+/// Its resolved value type is distinct from the span/style-preserving compatibility types.
+pub use fast_yaml_core as fast;
+pub use fast_yaml_core::{
+    MaxScanAhead, ParseLimits, decode_input, decode_input_owned, find_comments, has_comments,
+};
+
+/// Source-aware linting, configuration, rules and diagnostic formatters.
+#[cfg(feature = "lint")]
+pub use fast_yaml_linter as lint;
+
+/// Parallel stream parsing, file processing and atomic file output.
+#[cfg(feature = "parallel")]
+pub use fast_yaml_parallel as parallel;
+
+/// Emit one compatibility value with default options.
+pub fn safe_dump(value: &Value) -> EmitResult<String> {
+    Emitter::emit_str(value)
+}
+
+/// Emit a stream of compatibility values with document separators.
+pub fn safe_dump_all(values: &[Value]) -> EmitResult<String> {
+    Emitter::emit_all(values)
+}

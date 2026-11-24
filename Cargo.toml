@@ -1,40 +1,45 @@
 [package]
 name = "rs-yaml"
-description = "Value-first YAML parser and emitter for the rust-misc workspace"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+description = "YAML parsing, emission, formatting and source-aware diagnostics"
+license = "MIT OR Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/mwdghaz/rust-misc"
+repository = "https://github.com/codixor/rs-yaml"
 keywords = ["yaml", "parser", "emitter", "config"]
 categories = ["parsing", "encoding"]
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-version.workspace = true
-
-[lib]
-name = "rs_yaml"
-path = "src/lib.rs"
 
 [features]
 default = ["streaming"]
 streaming = []
-arena = ["bumpalo"]
+arena = ["streaming", "fast-yaml-core/arena"]
+lint = ["dep:fast-yaml-linter"]
+parallel = ["dep:fast-yaml-parallel"]
 
 [dependencies]
-bumpalo = { workspace = true, optional = true, features = ["collections"] }
-memchr = { workspace = true }
-ordered-float = { workspace = true }
-saphyr = { workspace = true }
-saphyr-parser = { workspace = true }
-thiserror = { workspace = true }
+fast-yaml-core = "0.8.0"
+fast-yaml-linter = { version = "0.8.0", optional = true, features = ["all-formats"] }
+fast-yaml-parallel = { version = "0.8.0", optional = true }
+ordered-float = "5.3"
+saphyr = "0.0.6"
+saphyr-parser = "0.0.6"
+thiserror = "2.0"
 
 [dev-dependencies]
-criterion = { workspace = true }
-indoc = { workspace = true }
-pretty_assertions.workspace = true
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support", "html_reports", "plotters"] }
+indoc = "2.0.7"
+pretty_assertions = "1.4"
 
 [[bench]]
 name = "yaml_core"
 harness = false
 
-[lints]
-workspace = true
+[lints.rust]
+unsafe_code = "forbid"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+overflow-checks = true

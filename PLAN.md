@@ -1,4 +1,6 @@
-# rs-yaml Plan
+# Historical rust-misc import plan
+
+This plan records work in the parent monorepo. See [README.md](README.md) for the supported standalone features and commands.
 
 Goal: turn `rs-yaml` into the workspace’s main YAML parser/emitter crate with a
 small stable public surface, crate-root proof tests, reproducible benchmarks,

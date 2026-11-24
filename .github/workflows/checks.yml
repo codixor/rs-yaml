@@ -1,0 +1,36 @@
+name: Rust checks
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.100.0 --profile minimal --component clippy,rustfmt
+      - run: cargo fmt --all --check && cargo fmt --manifest-path fuzz/Cargo.toml --check
+      - run: |
+          for flags in '--no-default-features' '' '--all-features'; do
+            cargo clippy --locked --all-targets $flags -- -D warnings
+            cargo test --locked $flags
+          done
+      - run: cargo doc --locked --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: cargo-fuzz@0.13.2,cargo-deny@0.22.0
+      - run: cargo deny --locked --all-features check
+      - run: cargo deny --manifest-path fuzz/Cargo.toml --config deny.toml --locked --all-features check
+      - run: cargo clippy --manifest-path fuzz/Cargo.toml --locked --all-targets -- -D warnings
+      - run: rustup toolchain install nightly-2026-10-31 --profile minimal
+      - name: Bounded AddressSanitizer fuzzing
+        run: |
+          for harness in load format; do
+            mkdir -p "fuzz/corpus/$harness"
+            cp tests/golden/*/*.yaml "fuzz/corpus/$harness/"
+            cargo +nightly-2026-10-31 fuzz run --sanitizer address "$harness" -- -runs=2000 -max_len=1024 -timeout=5 -rss_limit_mb=512
+          done

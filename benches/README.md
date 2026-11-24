@@ -5,7 +5,7 @@ Criterion output lives under the workspace `target/criterion/` directory.
 Run the full benchmark flow with:
 
 ```bash
-bash rs-yaml/scripts/bench.sh
+bash scripts/bench.sh
 ```
 
 The benchmark surface covers:
@@ -14,7 +14,7 @@ The benchmark surface covers:
 - emitter hot paths
 - `safe_load` regression cases
 - formatter comparisons:
-  - DOM/default
+  - DOM (no default features)
   - streaming
   - streaming arena
 

@@ -13,6 +13,7 @@ jobs:
     uses: ./.github/workflows/checks.yml
 
   plan:
+    if: startsWith(github.ref, 'refs/tags/v') && !github.event.deleted
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -30,7 +31,7 @@ jobs:
 
   publish:
     needs: [checks, plan]
-    if: needs.plan.outputs.required == 'true'
+    if: startsWith(github.ref, 'refs/tags/v') && !github.event.deleted && needs.plan.outputs.required == 'true'
     environment: cratesio
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -60,16 +61,15 @@ jobs:
           for package in "${packages[@]}"; do
             cargo publish --locked --registry crates-io -p "$package"
           done
-      - name: Create the GitHub tag and release
+      - name: Create the GitHub release for the pushed tag
         if: steps.release.outputs.create_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.release.outputs.version }}
-          TARGET: ${{ steps.release.outputs.target }}
         shell: bash
         run: |
           flags=()
           if [[ "${VERSION%%+*}" == *-* ]]; then flags+=(--prerelease); fi
-          gh release create "v$VERSION" --target "$TARGET" --title "rs-yaml $VERSION" \
+          gh release create "v$VERSION" --verify-tag --title "rs-yaml $VERSION" \
             --notes "[rs-yaml $VERSION on crates.io](https://crates.io/crates/rs-yaml/$VERSION)" \
             --generate-notes "${flags[@]}"

@@ -65,28 +65,24 @@ def inspect():
         raise SystemExit("rs-yaml must use the shared release version")
     packages.append(root["package"]["name"])
     tag = f"v{version}"
-    tagged_push = os.environ["GITHUB_REF_TYPE"] == "tag"
-    if tagged_push and os.environ["GITHUB_REF_NAME"] != tag:
-        raise SystemExit(f"Push tag must match Cargo.toml ({tag})")
+    if os.environ["GITHUB_REF"] != f"refs/tags/{tag}":
+        raise SystemExit(f"Push the tag matching Cargo.toml ({tag}) to release")
 
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    uploaded = {name: registry_commit(name, version) for name in packages}
-    pending = [name for name, commit in uploaded.items() if commit is None]
-    commits = {commit for commit in uploaded.values() if commit}
-    if len(commits) > 1:
-        raise SystemExit(f"Published members of {tag} have different source commits")
-    target = next(iter(commits), head)
-    if target != head and (tagged_push or pending):
-        raise SystemExit(f"Finish the release at its original checked commit {target}")
-    if commits:
-        subprocess.run(["git", "merge-base", "--is-ancestor", target, head], check=True)
-
     existing = subprocess.run(
         ["git", "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"],
         capture_output=True, text=True,
     )
-    if existing.returncode not in (0, 1) or (existing.returncode == 0 and existing.stdout.strip() != target):
-        raise SystemExit(f"Existing tag {tag} does not match release commit {target}")
+    if existing.returncode != 0 or existing.stdout.strip() != head:
+        raise SystemExit(f"Tag {tag} must exist and point to the checked-out commit {head}")
+
+    pending = []
+    for name in packages:
+        commit = registry_commit(name, version)
+        if commit is None:
+            pending.append(name)
+        elif commit != head:
+            raise SystemExit(f"Published {name} {version} came from {commit}, but {tag} points to {head}")
 
     repo = os.environ["GITHUB_REPOSITORY"]
     release = fetch(f"https://api.github.com/repos/{repo}/releases/tags/{tag}",
@@ -95,7 +91,6 @@ def inspect():
         raise SystemExit(f"An existing draft release needs review: {tag}")
     return {
         "version": version,
-        "target": target,
         "pending": " ".join(pending),
         "create_release": str(release is None).lower(),
         "required": str(bool(pending) or release is None).lower(),

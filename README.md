@@ -71,4 +71,6 @@ Imported from [codixor/rust-misc at ae68abb](https://github.com/codixor/rust-mis
 
 ## Releases
 
-Bump `workspace.package.version`, the three internal dependency pins, and the fuzz manifest's rs-yaml requirement when crossing a compatibility boundary. Refresh both lockfiles. All four published packages share the release version. Pushing to `main` or pushing a matching `v<version>` tag runs the checks and publishes the core, linter and parallel forks followed by rs-yaml through the GitHub `cratesio` environment. The workflow creates the matching GitHub release and tag. Further pushes with an already released version skip publication.
+Bump `workspace.package.version`, the three internal dependency pins, and the fuzz manifest's rs-yaml requirement when crossing a compatibility boundary. Refresh both lockfiles. All four published packages share the release version. Pushes to `main` run the checks only. To release, push a tag named `v<version>` at the release commit. The tag must match `workspace.package.version`.
+
+After the tag's checks pass, the workflow publishes the core, linter and parallel forks, followed by rs-yaml, through the GitHub `cratesio` environment. It then creates the GitHub release for the pushed tag. Rerunning the workflow verifies already-published packages and resumes any unfinished steps.

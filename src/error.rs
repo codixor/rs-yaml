@@ -61,6 +61,10 @@ pub enum ParseError {
         kind: &'static str,
     },
 
+    /// Distinct source keys collapsed to one key in the owned value representation.
+    #[error("mapping keys resolve to the same YAML value")]
+    ConflictingKeys,
+
     /// Duplicate mapping key detected.
     #[error(
         "duplicate YAML mapping key first defined at line {first_line}, column {first_column}, duplicated at line {duplicate_line}, column {duplicate_column}"
@@ -81,10 +85,18 @@ pub enum ParseError {
 
 impl From<saphyr::ScanError> for ParseError {
     fn from(error: saphyr::ScanError) -> Self {
-        Self::Scanner(saphyr::ScanError::new_str(
-            *error.marker(),
-            "invalid YAML syntax",
-        ))
+        // Only fixed diagnostics cross the API boundary. Other scanner errors may
+        // interpolate a tag, directive or part of the input.
+        let reason = match error.info() {
+            safe @ ("while parsing node, found unknown anchor"
+            | "while parsing a node, did not find expected node content"
+            | "while parsing a block mapping, did not find expected key"
+            | "while parsing a flow sequence, expected ',' or ']'"
+            | "while scanning a quoted scalar, found unexpected end of stream"
+            | "while parsing a quoted scalar, found unknown escape character") => safe,
+            _ => "invalid YAML syntax",
+        };
+        Self::Scanner(saphyr::ScanError::new_str(*error.marker(), reason))
     }
 }
 

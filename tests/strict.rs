@@ -11,6 +11,8 @@ fn all_loaders_and_formatters_reject_equivalent_mapping_keys() {
         "? {a: 1, b: 2}\n: first\n? {b: 2, a: 1}\n: second",
         "key: &seq [a, b]\n? *seq\n: first\n? [a, b]\n: second",
         "<<: {a: 1}\n<<: {b: 2}",
+        "? [<<]\n: first\n? ['<<']\n: second",
+        "? {a: <<}\n: first\n? {a: '<<'}\n: second",
     ] {
         assert!(safe_load(yaml).is_err(), "{yaml}");
         assert!(safe_load_all(yaml).is_err(), "{yaml}");
@@ -85,4 +87,12 @@ fn duplicate_locations_point_to_keys_and_not_their_values() {
             ..
         }
     ));
+}
+
+#[test]
+fn compatibility_conversion_never_replaces_a_second_explicit_key() {
+    // Saphyr drops this collection's mismatched core tag and normalization removes
+    // the scalar style. The owned keys would otherwise be identical.
+    let yaml = "? !!seq {a: b}\n: one\n? {a: 'b'}\n: two";
+    assert!(safe_load(yaml).is_err());
 }

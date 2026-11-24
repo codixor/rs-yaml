@@ -5,12 +5,16 @@ use std::collections::{BTreeMap, HashMap};
 
 use saphyr_parser::{Event, Marker, Tag};
 
-use crate::{ParseError, ParseResult, Value, parser::scalar_key};
+use crate::{
+    ParseError, ParseResult, Value,
+    parser::{is_merge_scalar, normalize_representation},
+};
 
 type Id = usize;
 
 #[derive(Eq, PartialEq, Hash)]
 enum Node {
+    Merge,
     Scalar(Value),
     Sequence(Option<Tag>, Vec<Id>),
     Mapping(Option<Tag>, Vec<(Id, Id)>),
@@ -53,9 +57,10 @@ impl Keys {
             .iter()
             .map(|&[key, value]| (key, value))
             .collect();
-        let Some(index) = pairs.iter().position(
-            |&(k, _)| matches!(&self.nodes[k], Node::Scalar(v) if crate::parser::is_merge_key(v)),
-        ) else {
+        let Some(index) = pairs
+            .iter()
+            .position(|&(k, _)| matches!(&self.nodes[k], Node::Merge))
+        else {
             pairs.sort_unstable();
             return Ok(pairs);
         };
@@ -84,6 +89,22 @@ impl Keys {
             self.anchors
                 .insert(anchor, id.expect("anchors are captured"));
         }
+        // The merge spelling is a directive only in key position. As an element or
+        // mapping value inside a compound key it compares as the literal string.
+        let id = if id.is_some_and(|id| matches!(self.nodes[id], Node::Merge))
+            && self
+                .stack
+                .last()
+                .is_some_and(|p| p.children.is_some() && !p.expecting_key)
+        {
+            Some(
+                self.intern(Node::Scalar(Value::Value(crate::ScalarOwned::String(
+                    "<<".into(),
+                )))),
+            )
+        } else {
+            id
+        };
         if let Some(parent) = self.stack.last_mut() {
             if let Some(keys) = &mut parent.keys {
                 if parent.expecting_key
@@ -143,8 +164,16 @@ impl Keys {
             }
             Event::Scalar(text, style, anchor, tag) => {
                 let id = if self.capturing(*anchor) {
-                    let value = scalar_key(text, *style, tag.as_deref())?;
-                    Some(self.intern(Node::Scalar(value)))
+                    let node = if is_merge_scalar(text, *style, tag.as_deref()) {
+                        Node::Merge
+                    } else {
+                        Node::Scalar(normalize_representation(
+                            text.to_string(),
+                            *style,
+                            tag.as_deref().cloned(),
+                        )?)
+                    };
+                    Some(self.intern(node))
                 } else {
                     None
                 };

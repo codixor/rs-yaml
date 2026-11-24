@@ -1,0 +1,40 @@
+[package]
+name = "rs-yaml"
+description = "Value-first YAML parser and emitter for the rust-misc workspace"
+readme = "README.md"
+repository = "https://github.com/mwdghaz/rust-misc"
+keywords = ["yaml", "parser", "emitter", "config"]
+categories = ["parsing", "encoding"]
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+name = "rs_yaml"
+path = "src/lib.rs"
+
+[features]
+default = ["streaming"]
+streaming = []
+arena = ["bumpalo"]
+
+[dependencies]
+bumpalo = { workspace = true, optional = true, features = ["collections"] }
+memchr = { workspace = true }
+ordered-float = { workspace = true }
+saphyr = { workspace = true }
+saphyr-parser = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+indoc = { workspace = true }
+pretty_assertions.workspace = true
+
+[[bench]]
+name = "yaml_core"
+harness = false
+
+[lints]
+workspace = true

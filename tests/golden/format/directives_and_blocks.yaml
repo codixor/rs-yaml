@@ -1,0 +1,9 @@
+%YAML 1.2
+---
+title: example
+description: |
+  first line
+  second line
+items:
+  - one
+  - two

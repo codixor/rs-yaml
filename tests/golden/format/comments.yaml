@@ -1,0 +1,5 @@
+# header comment
+key: value # inline comment
+nested:
+  # nested comment
+  child: 1

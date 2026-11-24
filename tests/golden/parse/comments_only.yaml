@@ -1,0 +1,2 @@
+# comment-only YAML should still be a valid null document
+# this fixture protects safe_load / parse_str behavior

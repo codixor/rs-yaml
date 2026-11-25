@@ -94,7 +94,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
 name = "codixor-fast-yaml-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "bumpalo",
  "indexmap",
@@ -106,7 +106,7 @@ dependencies = [
 
 [[package]]
 name = "codixor-fast-yaml-linter"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "codixor-fast-yaml-core",
  "ignore",
@@ -413,13 +413,13 @@ checksum = "d902046e6a28a1e4c3cab97258a0ce11e994903f01c2d97a9447a0b3df85f4f6"
 
 [[package]]
 name = "rs-format"
-version = "0.1.0"
+version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0923a90fc8c06ff3e4e3b8b96b2b738ed3019c9d8a6b9ea0ce259f17fa68dc38"
+checksum = "21b298a077223c19e5e24bb8389966c8a8a593415e3cc73fbcd9756ac745637a"
 
 [[package]]
 name = "rs-yaml"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "codixor-fast-yaml-core",
  "codixor-fast-yaml-linter",

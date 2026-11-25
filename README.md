@@ -4,8 +4,11 @@ A Rust 1.100 library for parsing, emitting, formatting and linting YAML. The com
 
 ```toml
 [dependencies]
-rs-yaml = "0.5.0"
+rs-yaml = "0.6.0"
 ```
+
+In 0.6, `ParseError::UnresolvedAlias { at }` carries the location of the alias
+reference. Use `UnresolvedAlias { .. }` to match this error without reading its location.
 
 ```rust
 use rs_yaml::{safe_dump, safe_load};

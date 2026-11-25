@@ -19,6 +19,7 @@ lint = ["dep:fast-yaml-linter"]
 parallel = ["dep:fast-yaml-parallel"]
 
 [dependencies]
+rs-format = "0.1.0"
 indexmap = "2.14.2"
 serde_core = { version = "1.0.229", optional = true }
 serde-saphyr = { version = "2.2.0", default-features = false, features = ["serialize", "deserialize"], optional = true }
@@ -55,16 +56,16 @@ members = ["crates/fast-yaml-core", "crates/fast-yaml-linter", "crates/fast-yaml
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.100"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/codixor/rs-yaml"
 
 [workspace.dependencies]
-fast-yaml-core = { package = "codixor-fast-yaml-core", version = "=0.4.0", path = "crates/fast-yaml-core" }
-fast-yaml-linter = { package = "codixor-fast-yaml-linter", version = "=0.4.0", path = "crates/fast-yaml-linter" }
-fast-yaml-parallel = { package = "codixor-fast-yaml-parallel", version = "=0.4.0", path = "crates/fast-yaml-parallel" }
+fast-yaml-core = { package = "codixor-fast-yaml-core", version = "=0.5.0", path = "crates/fast-yaml-core" }
+fast-yaml-linter = { package = "codixor-fast-yaml-linter", version = "=0.5.0", path = "crates/fast-yaml-linter" }
+fast-yaml-parallel = { package = "codixor-fast-yaml-parallel", version = "=0.5.0", path = "crates/fast-yaml-parallel" }
 bumpalo = { version = "3.20" }
 exacl = { version = "0.13" }
 ignore = { version = "0.4" }

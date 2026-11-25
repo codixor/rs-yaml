@@ -42,10 +42,14 @@
 
 mod keys;
 mod load_guard;
+mod source;
 #[cfg(feature = "serde")]
 mod typed;
 #[cfg(feature = "serde")]
-pub use typed::{from_str, to_string};
+pub use typed::{from_str, from_str_with_limits, to_string};
+
+pub use load_guard::YAML_LIMITS;
+pub use rs_format::{Category, FormatError, Limits, Position};
 
 /// YAML emitter for serializing documents to strings.
 pub mod emitter;
@@ -65,7 +69,10 @@ pub mod streaming;
 
 pub use emitter::{Emitter, EmitterConfig};
 pub use error::{EmitError, EmitResult, ParseError, ParseResult};
-pub use parser::{Parser, canonicalize, safe_load, safe_load_all};
+pub use parser::{
+    Parser, canonicalize, safe_load, safe_load_all, safe_load_all_with_limits,
+    safe_load_with_limits,
+};
 pub use value::{
     Array, Map, MarkedValue, Marker, OrderedFloat, ScalarOwned, Span, Value, YamlDataOwned,
 };

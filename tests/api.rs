@@ -28,15 +28,11 @@ fn emitter_config_defaults_and_builder_clamps_are_publicly_stable() {
 
 #[test]
 fn parse_and_emit_errors_have_human_readable_messages() {
-    let parse = ParseError::Syntax {
-        line: 10,
-        column: 5,
-        message: "unexpected token".to_owned(),
-    };
-    assert!(parse.to_string().contains("line 10"));
-    assert!(parse.to_string().contains("column 5"));
+    let parse = rs_yaml::safe_load("a: [").unwrap_err();
+    assert!(matches!(parse, ParseError::Syntax { .. }));
+    assert!(parse.to_string().contains("line"));
 
-    let emit = EmitError::UnsupportedType("complex key not supported".to_owned());
+    let emit = EmitError::UnsupportedType("complex key not supported");
     assert_eq!(
         emit.to_string(),
         "unsupported type for serialization: complex key not supported"

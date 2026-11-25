@@ -72,7 +72,7 @@ impl EmitterConfig {
     #[cfg(feature = "streaming")]
     pub(crate) fn upstream(&self) -> EmitResult<fast_yaml_core::EmitterConfig> {
         let indent = fast_yaml_core::Indent::new(self.indent.clamp(1, 9))
-            .map_err(|e| EmitError::Emit(e.to_string()))?;
+            .map_err(|_| EmitError::Emit("could not write YAML"))?;
         Ok(fast_yaml_core::EmitterConfig::new()
             .with_indent(indent)
             .with_layout(fast_yaml_core::Layout::from_flow_flag(
@@ -177,7 +177,7 @@ impl Emitter {
             let yaml_borrowed = Self::emission_node(value, 0)?;
             emitter
                 .dump(&yaml_borrowed)
-                .map_err(|e| EmitError::Emit(e.to_string()))?;
+                .map_err(|_| EmitError::Emit("could not write YAML"))?;
         }
 
         // Apply post-processing for configuration options
@@ -233,7 +233,7 @@ impl Emitter {
             Value::BadValue => Yaml::BadValue,
             Value::Alias(_) => {
                 return Err(EmitError::UnsupportedType(
-                    "alias without an anchor definition".into(),
+                    "alias without an anchor definition",
                 ));
             }
         })
@@ -259,9 +259,7 @@ impl Emitter {
 
     fn check_depth(depth: usize) -> EmitResult<()> {
         if depth >= crate::load_guard::MAX_DEPTH {
-            return Err(EmitError::Emit(
-                "value exceeds maximum nesting depth".into(),
-            ));
+            return Err(EmitError::Limit("value exceeds maximum nesting depth"));
         }
         Ok(())
     }
@@ -437,8 +435,7 @@ impl Emitter {
         #[cfg(not(feature = "streaming"))]
         {
             let directives = Self::extract_directives(input);
-            let docs = crate::Parser::parse_all_preserving_styles(input)
-                .map_err(|e| EmitError::Emit(e.to_string()))?;
+            let docs = crate::Parser::parse_all_preserving_styles(input)?;
             if docs.is_empty() {
                 return Ok(String::new());
             }
@@ -551,18 +548,18 @@ impl Emitter {
                             // Block scalar directly as value: `key: |\n  line\n`
                             let val_str = Self::emit_value(v, config, indent_level + 1)?;
                             write!(out, "{indent}{key_str}: {val_str}")
-                                .map_err(|e| EmitError::Emit(e.to_string()))?;
+                                .map_err(|_| EmitError::Emit("could not write YAML"))?;
                         }
                         Value::Mapping(_) | Value::Sequence(_) => {
                             writeln!(out, "{indent}{key_str}:")
-                                .map_err(|e| EmitError::Emit(e.to_string()))?;
+                                .map_err(|_| EmitError::Emit("could not write YAML"))?;
                             let val_str = Self::emit_value(v, config, indent_level + 1)?;
                             out.push_str(&val_str);
                         }
                         _ => {
                             let val_str = Self::emit_value_inline(v)?;
                             writeln!(out, "{indent}{key_str}: {val_str}")
-                                .map_err(|e| EmitError::Emit(e.to_string()))?;
+                                .map_err(|_| EmitError::Emit("could not write YAML"))?;
                         }
                     }
                 }
@@ -576,18 +573,18 @@ impl Emitter {
                         Value::Representation(_, ScalarStyle::Literal | ScalarStyle::Folded, _) => {
                             let item_str = Self::emit_value(item, config, indent_level + 1)?;
                             write!(out, "{indent}- {item_str}")
-                                .map_err(|e| EmitError::Emit(e.to_string()))?;
+                                .map_err(|_| EmitError::Emit("could not write YAML"))?;
                         }
                         Value::Mapping(_) | Value::Sequence(_) => {
                             writeln!(out, "{indent}-")
-                                .map_err(|e| EmitError::Emit(e.to_string()))?;
+                                .map_err(|_| EmitError::Emit("could not write YAML"))?;
                             let item_str = Self::emit_value(item, config, indent_level + 1)?;
                             out.push_str(&item_str);
                         }
                         _ => {
                             let item_str = Self::emit_value_inline(item)?;
                             writeln!(out, "{indent}- {item_str}")
-                                .map_err(|e| EmitError::Emit(e.to_string()))?;
+                                .map_err(|_| EmitError::Emit("could not write YAML"))?;
                         }
                     }
                 }
@@ -603,9 +600,7 @@ impl Emitter {
     fn emit_scalar_inline(value: &Value) -> EmitResult<String> {
         match value {
             Value::Value(_) | Value::Representation(..) => Self::emit_value_inline(value),
-            _ => Err(EmitError::UnsupportedType(
-                "complex key not supported here".into(),
-            )),
+            _ => Err(EmitError::UnsupportedType("complex key not supported here")),
         }
     }
 
@@ -618,7 +613,7 @@ impl Emitter {
             let yaml = Self::emission_node(value, 0)?;
             emitter
                 .dump(&yaml)
-                .map_err(|e| EmitError::Emit(e.to_string()))?;
+                .map_err(|_| EmitError::Emit("could not write YAML"))?;
         }
         // saphyr emits "---\nvalue\n" — strip markers
         let trimmed = out
@@ -682,7 +677,7 @@ impl Emitter {
                     let key_str = Self::emit_flow(k, depth + 1)?;
                     let val_str = Self::emit_flow(v, depth + 1)?;
                     write!(out, "{key_str}: {val_str}")
-                        .map_err(|e| EmitError::Emit(e.to_string()))?;
+                        .map_err(|_| EmitError::Emit("could not write YAML"))?;
                 }
                 out.push('}');
                 Ok(out)

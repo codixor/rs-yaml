@@ -4,7 +4,7 @@ A Rust 1.100 library for parsing, emitting, formatting and linting YAML. The com
 
 ```toml
 [dependencies]
-rs-yaml = "0.4.0"
+rs-yaml = "0.5.0"
 ```
 
 ```rust
@@ -53,7 +53,7 @@ For a Serde `u32` file mode, write `mode: 0o600` (octal) or `mode: 384` (decimal
 
 For a boolean field, use `true` or `false`. The loader also accepts their title-case and uppercase forms. It rejects YAML 1.1 spellings such as `yes` and `on`. Explicit tags must resolve to one of the seven YAML core tags, such as `!!str`. Local tags such as `!vault` and enum tags such as `!Low` return `ParseError::UnsupportedTag` with a source location.
 
-An unknown-field error can name the misspelled mapping key and list the allowed fields. A type error can identify the expected type, such as `u16`. Input values, unknown variant names and custom visitor messages are omitted.
+Unknown-field and unknown-variant diagnostics use fixed descriptions. Numeric type errors can identify the expected primitive type, such as `u16`. Keys, values and custom visitor messages stay out of returned errors, including their debug output and sources.
 
 ## Handling input
 
@@ -61,7 +61,27 @@ An unknown-field error can name the misspelled mapping key and list the allowed 
 
 The typed adapter uses serde-saphyr after the compatibility checks. The `fast`, `lint` and `parallel` re-exports retain their own parsing and diagnostic policies.
 
-Compatibility loaders cap each input at 8 MiB, expanded nesting at 64 nodes, streams at 4,096 documents, and estimated materialization work at 32 MiB. The estimate charges nodes, text, tags, stored anchors and alias copies. A limit violation returns `ParseError::ResourceLimit`, including when Saphyr reaches its own flow-nesting or alias-expansion limit. Use `fast::Parser::parse_all_with_limits` for configurable upstream budgets. Applications reading external files or requests should bound the incoming bytes before collecting them into a string.
+The compatibility and typed loaders use `YAML_LIMITS`. They cap the whole stream at 8 MiB, expanded nesting at 64 nodes (including scalar leaves), document count at 4,096, and estimated materialization work at 32 MiB. The estimate charges 128 bytes per node plus scalar and tag payload bytes, saved anchors and alias copies. These safety ceilings remain active when a caller supplies additional limits. The typed backend and Saphyr also retain their own protections.
+
+Use the `_with_limits` form of each guarded parser or validation method, `safe_load[_all]_with_limits`, or typed `from_str_with_limits::<T>`. Each takes `&rs_format::Limits`. The crate re-exports the shared types. For example:
+
+```rust
+use rs_yaml::{Category, FormatError, Limits, safe_load_with_limits};
+
+let limits = Limits { max_token_bytes: 3, ..Limits::default() };
+let error = safe_load_with_limits("name: x", &limits).unwrap_err();
+assert_eq!(error.category(), Category::Limit);
+assert_eq!(error.position().unwrap().offset, Some(3));
+```
+
+- `max_document_bytes` counts source bytes per document, including its separator and line endings. An implicit document ends at the next document marker. An explicit `...` ends after its line terminator. Leading and trailing stream trivia count against the adjacent document.
+- `max_depth` counts expanded containers. A scalar has depth zero and a root collection has depth one. Aliases must also fit at their point of use.
+- `max_token_bytes` counts UTF-8 bytes in the encoded body of each scalar, key, comment, property name or directive word. Quotes and the comment indicator are excluded. Escapes and doubled quotes count as written. A block scalar body begins after its header line and includes its physical indentation and newlines. Saphyr can buffer a token before reporting its span. The 8 MiB input ceiling bounds this scanner input independently.
+- `max_expansion` charges the materialization estimate of the target at each alias use and of the source at each merge. An alias used for a merge incurs both charges. Ordinary nodes and anchor definitions alone have zero expansion cost. The expansion budget resets at each document.
+
+Both `ParseError` and `EmitError` implement `rs_format::FormatError`. A known position uses a zero-based byte offset and one-based line and byte column. Duplicate-key errors retain both positions and report the duplicate through the trait. A normalization error with no source span reports no position. In 0.5 the error variants no longer carry a duplicate key, invalid value or raw scanner/Serde error.
+
+The `fast`, `lint` and `parallel` facades expose their upstream policies and diagnostics. Applications reading a file or HTTP body should bound incoming bytes before collecting the string.
 
 ## Development
 

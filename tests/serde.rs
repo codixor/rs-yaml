@@ -159,25 +159,21 @@ fn tags_outside_the_core_schema_are_refused() {
 }
 
 #[test]
-fn serde_errors_name_the_setting_but_never_the_value() {
+fn serde_errors_describe_the_problem_without_input_names_or_values() {
     let cases = [
-        (
-            "tokne: private-fixture-marker",
-            "unknown field `tokne`, expected one of",
-        ),
+        ("tokne: private-fixture-marker", "unknown field"),
         ("port: private-fixture-marker", "invalid value for u16"),
         ("port: 70000", "u16"),
-        (
-            "level: private-fixture-marker",
-            "unknown variant, expected one of `Low`, `High`",
-        ),
+        ("level: private-fixture-marker", "unknown variant"),
     ];
     for (yaml, wanted) in cases {
         let error = from_str::<Strict>(yaml).unwrap_err();
         let text = format!("{error} {error:?}");
         assert!(text.contains(wanted), "{yaml}: {text}");
         assert!(
-            !text.contains("private-fixture-marker") && !text.contains("70000"),
+            !text.contains("private-fixture-marker")
+                && !text.contains("70000")
+                && !text.contains("tokne"),
             "{text}"
         );
     }
@@ -220,7 +216,7 @@ fn serde_expected_messages_cannot_disclose_values() {
 }
 
 #[test]
-fn unknown_field_messages_only_quote_mapping_keys() {
+fn custom_unknown_field_arguments_are_redacted() {
     #[derive(Debug, Deserialize)]
     struct Config {
         #[allow(dead_code)]

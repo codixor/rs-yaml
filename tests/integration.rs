@@ -56,19 +56,19 @@ fn compatibility_entry_points_share_the_depth_limit() {
     let document = format!("{}0{}", "[".repeat(65), "]".repeat(65));
     assert!(matches!(
         Parser::parse_str(&document),
-        Err(ParseError::ResourceLimit(_))
+        Err(ParseError::ResourceLimit { .. })
     ));
     assert!(matches!(
         Parser::parse_marked_str(&document),
-        Err(ParseError::ResourceLimit(_))
+        Err(ParseError::ResourceLimit { .. })
     ));
     assert!(matches!(
         Parser::parse_all_preserving_styles(&document),
-        Err(ParseError::ResourceLimit(_))
+        Err(ParseError::ResourceLimit { .. })
     ));
     assert!(matches!(
         Parser::validate_no_duplicate_mapping_keys(&document),
-        Err(ParseError::ResourceLimit(_))
+        Err(ParseError::ResourceLimit { .. })
     ));
 }
 

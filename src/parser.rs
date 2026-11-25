@@ -1,7 +1,8 @@
 use std::{borrow::Cow, collections::HashSet};
 
+use crate::Limits;
 use crate::error::{ParseError, ParseResult};
-use crate::load_guard::Documents;
+use crate::load_guard::{Documents, YAML_LIMITS};
 use crate::value::{MarkedValue, Value, YamlDataOwned};
 use saphyr::{LoadableYamlNode, MappingOwned, ScalarOwned, Tag, YamlLoader, parse_core_schema_fp};
 use saphyr_parser::SpannedEventReceiver;
@@ -38,7 +39,12 @@ impl Parser {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn parse_str(input: &str) -> ParseResult<Value> {
-        let mut docs = load_documents_preserving_styles(input, Documents::Single)?;
+        Self::parse_str_with_limits(input, &YAML_LIMITS)
+    }
+
+    /// Apply caller-selected resource limits to [`Self::parse_str`].
+    pub fn parse_str_with_limits(input: &str, limits: &Limits) -> ParseResult<Value> {
+        let mut docs = load_documents_preserving_styles(input, Documents::Single, limits)?;
         docs.pop()
             .map_or(Ok(Value::Value(ScalarOwned::Null)), normalize_value)
     }
@@ -62,7 +68,12 @@ impl Parser {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn parse_all(input: &str) -> ParseResult<Vec<Value>> {
-        load_documents_preserving_styles(input, Documents::Stream)?
+        Self::parse_all_with_limits(input, &YAML_LIMITS)
+    }
+
+    /// Apply caller-selected resource limits to [`Self::parse_all`].
+    pub fn parse_all_with_limits(input: &str, limits: &Limits) -> ParseResult<Vec<Value>> {
+        load_documents_preserving_styles(input, Documents::Stream, limits)?
             .into_iter()
             .map(normalize_value)
             .collect()
@@ -74,7 +85,15 @@ impl Parser {
     ///
     /// Returns a parse error on invalid input. Duplicate keys report both source positions.
     pub fn validate_no_duplicate_mapping_keys(input: &str) -> ParseResult<()> {
-        crate::load_guard::validate(input, Documents::Stream)
+        Self::validate_no_duplicate_mapping_keys_with_limits(input, &YAML_LIMITS)
+    }
+
+    /// Apply caller-selected resource limits to [`Self::validate_no_duplicate_mapping_keys`].
+    pub fn validate_no_duplicate_mapping_keys_with_limits(
+        input: &str,
+        limits: &Limits,
+    ) -> ParseResult<()> {
+        crate::load_guard::validate(input, Documents::Stream, limits)
     }
 
     /// Parse a single YAML document while preserving source spans.
@@ -90,9 +109,16 @@ impl Parser {
     ///
     /// Returns [`ParseError`] if the YAML syntax is invalid.
     pub fn parse_marked_str(input: &str) -> ParseResult<MarkedValue> {
-        Ok(load_documents_preserving_styles(input, Documents::Single)?
-            .pop()
-            .unwrap_or_else(|| MarkedValue::from(YamlDataOwned::Value(ScalarOwned::Null))))
+        Self::parse_marked_str_with_limits(input, &YAML_LIMITS)
+    }
+
+    /// Apply caller-selected resource limits to [`Self::parse_marked_str`].
+    pub fn parse_marked_str_with_limits(input: &str, limits: &Limits) -> ParseResult<MarkedValue> {
+        Ok(
+            load_documents_preserving_styles(input, Documents::Single, limits)?
+                .pop()
+                .unwrap_or_else(|| MarkedValue::from(YamlDataOwned::Value(ScalarOwned::Null))),
+        )
     }
 
     /// Parse all YAML documents while preserving source spans.
@@ -105,7 +131,15 @@ impl Parser {
     ///
     /// Returns [`ParseError`] if the YAML syntax is invalid.
     pub fn parse_all_marked(input: &str) -> ParseResult<Vec<MarkedValue>> {
-        load_documents_preserving_styles(input, Documents::Stream)
+        Self::parse_all_marked_with_limits(input, &YAML_LIMITS)
+    }
+
+    /// Apply caller-selected resource limits to [`Self::parse_all_marked`].
+    pub fn parse_all_marked_with_limits(
+        input: &str,
+        limits: &Limits,
+    ) -> ParseResult<Vec<MarkedValue>> {
+        load_documents_preserving_styles(input, Documents::Stream, limits)
     }
 
     /// Parse all YAML documents preserving scalar styles (literal `|`, folded `>`).
@@ -118,11 +152,19 @@ impl Parser {
     ///
     /// # Errors
     ///
-    /// Returns `ParseError::Scanner` if the YAML syntax is invalid.
+    /// Returns `ParseError::Syntax` if the YAML syntax is invalid.
     ///
     /// [`parse_all`]: Parser::parse_all
     pub fn parse_all_preserving_styles(input: &str) -> ParseResult<Vec<Value>> {
-        load_documents_preserving_styles(input, Documents::Stream)
+        Self::parse_all_preserving_styles_with_limits(input, &YAML_LIMITS)
+    }
+
+    /// Apply caller-selected resource limits to [`Self::parse_all_preserving_styles`].
+    pub fn parse_all_preserving_styles_with_limits(
+        input: &str,
+        limits: &Limits,
+    ) -> ParseResult<Vec<Value>> {
+        load_documents_preserving_styles(input, Documents::Stream, limits)
     }
 }
 
@@ -167,6 +209,16 @@ pub fn safe_load_all(input: &str) -> ParseResult<Vec<Value>> {
     Parser::parse_all(input)
 }
 
+/// Load one document under caller-selected resource limits.
+pub fn safe_load_with_limits(input: &str, limits: &Limits) -> ParseResult<Value> {
+    Parser::parse_str_with_limits(input, limits)
+}
+
+/// Load a document stream under caller-selected resource limits.
+pub fn safe_load_all_with_limits(input: &str, limits: &Limits) -> ParseResult<Vec<Value>> {
+    Parser::parse_all_with_limits(input, limits)
+}
+
 fn normalize_value(value: Value) -> ParseResult<Value> {
     match value {
         Value::Representation(text, style, tag) => normalize_representation(text, style, tag),
@@ -184,13 +236,14 @@ fn normalize_value(value: Value) -> ParseResult<Value> {
 fn load_documents_preserving_styles<'a, Node: LoadableYamlNode<'a>>(
     input: &'a str,
     documents: Documents,
+    limits: &Limits,
 ) -> ParseResult<Vec<Node>> {
     let mut loader = YamlLoader::<Node>::default();
     loader.early_parse(false);
-    crate::load_guard::load(input, documents, |event, span| {
+    crate::load_guard::load(input, documents, limits, |event, span| {
         loader.on_event(event, span);
         if let Some(error) = loader.error() {
-            return Err(ParseError::from(error.clone()));
+            return Err(ParseError::from_input(error, input));
         }
         Ok(())
     })?;
@@ -429,19 +482,17 @@ fn value_kind(value: &Value) -> &'static str {
 
 fn invalid_tag(tag: &Tag) -> ParseError {
     match tag.suffix.as_str() {
-        // saphyr's `Display` gives `tag:yaml.org,2002:!int`; show the spelling the user wrote.
-        suffix @ ("bool" | "int" | "float" | "null" | "str" | "seq" | "map")
-            if tag.is_yaml_core_schema() =>
-        {
-            invalid_tag_name(&format!("!!{suffix}"))
-        }
+        "bool" => invalid_tag_name("!!bool"),
+        "int" => invalid_tag_name("!!int"),
+        "float" => invalid_tag_name("!!float"),
+        "null" => invalid_tag_name("!!null"),
+        "str" => invalid_tag_name("!!str"),
+        "seq" => invalid_tag_name("!!seq"),
+        "map" => invalid_tag_name("!!map"),
         _ => invalid_tag_name("[unrecognized]"),
     }
 }
 
-fn invalid_tag_name(tag: &str) -> ParseError {
-    ParseError::InvalidTaggedValue {
-        tag: tag.to_owned(),
-        value: "[redacted]".into(),
-    }
+fn invalid_tag_name(tag: &'static str) -> ParseError {
+    ParseError::InvalidTaggedValue { tag }
 }

@@ -1,5 +1,6 @@
 //! Compare mapping keys before a value loader can overwrite them. Node IDs are scoped to a
 //! document. Aliases reuse the target ID; mapping identity is independent of entry order.
+use crate::error::Location;
 use indexmap::IndexSet;
 use std::collections::{BTreeMap, HashMap};
 
@@ -84,7 +85,13 @@ impl Keys {
         Ok(effective.into_iter().collect())
     }
 
-    fn finish(&mut self, id: Option<Id>, anchor: usize, mark: Marker) -> ParseResult<()> {
+    fn finish(
+        &mut self,
+        id: Option<Id>,
+        anchor: usize,
+        mark: Marker,
+        input: &str,
+    ) -> ParseResult<()> {
         if anchor != 0 {
             self.anchors
                 .insert(anchor, id.expect("anchors are captured"));
@@ -111,11 +118,8 @@ impl Keys {
                     && let Some(first) = keys.insert(id.expect("keys are captured"), mark)
                 {
                     return Err(ParseError::DuplicateKey {
-                        key: "[redacted]".into(),
-                        first_line: first.line(),
-                        first_column: first.col() + 1,
-                        duplicate_line: mark.line(),
-                        duplicate_column: mark.col() + 1,
+                        first: Location::marker(input, first),
+                        duplicate: Location::marker(input, mark),
                     });
                 }
                 parent.expecting_key = !parent.expecting_key;
@@ -127,7 +131,12 @@ impl Keys {
         Ok(())
     }
 
-    pub(crate) fn observe(&mut self, event: &Event<'_>, mark: Marker) -> ParseResult<()> {
+    pub(crate) fn observe(
+        &mut self,
+        event: &Event<'_>,
+        mark: Marker,
+        input: &str,
+    ) -> ParseResult<()> {
         match event {
             Event::DocumentStart(_) => {
                 self.nodes.clear();
@@ -160,7 +169,7 @@ impl Keys {
                 } else {
                     None
                 };
-                self.finish(id, frame.anchor, frame.mark)?;
+                self.finish(id, frame.anchor, frame.mark, input)?;
             }
             Event::Scalar(text, style, anchor, tag) => {
                 let id = if self.capturing(*anchor) {
@@ -177,7 +186,7 @@ impl Keys {
                 } else {
                     None
                 };
-                self.finish(id, *anchor, mark)?;
+                self.finish(id, *anchor, mark, input)?;
             }
             Event::Alias(anchor) => {
                 let id = self
@@ -185,7 +194,7 @@ impl Keys {
                     .get(anchor)
                     .copied()
                     .ok_or(ParseError::UnresolvedAlias)?;
-                self.finish(Some(id), 0, mark)?;
+                self.finish(Some(id), 0, mark, input)?;
             }
             _ => {}
         }

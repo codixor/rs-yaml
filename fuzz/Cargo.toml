@@ -16,7 +16,7 @@ unsafe_code = "forbid"
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
-rs-yaml = { version = "0.4", path = "..", features = ["arena", "lint", "serde"] }
+rs-yaml = { version = "0.5", path = "..", features = ["arena", "lint", "serde"] }
 
 [[bin]]
 name = "load"

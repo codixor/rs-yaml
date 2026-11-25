@@ -7,7 +7,7 @@ use crate::{EmitError, EmitResult, EmitterConfig};
 pub fn format_streaming(input: &str, config: &EmitterConfig) -> EmitResult<String> {
     validate_stream(input)?;
     fast_yaml_core::streaming::format_streaming(input, &config.upstream()?)
-        .map_err(|_| EmitError::Emit("could not format YAML stream".into()))
+        .map_err(|_| EmitError::Emit("could not format YAML stream"))
 }
 
 /// Format YAML with an arena for temporary parser state.
@@ -15,7 +15,7 @@ pub fn format_streaming(input: &str, config: &EmitterConfig) -> EmitResult<Strin
 pub fn format_streaming_arena(input: &str, config: &EmitterConfig) -> EmitResult<String> {
     validate_stream(input)?;
     fast_yaml_core::streaming::format_streaming_arena(input, &config.upstream()?)
-        .map_err(|_| EmitError::Emit("could not format YAML stream".into()))
+        .map_err(|_| EmitError::Emit("could not format YAML stream"))
 }
 
 /// Historical heuristic for callers choosing between streaming and DOM processing.
@@ -26,6 +26,5 @@ pub fn is_streaming_suitable(input: &str) -> bool {
 }
 
 fn validate_stream(input: &str) -> EmitResult<()> {
-    crate::Parser::validate_no_duplicate_mapping_keys(input)
-        .map_err(|error| EmitError::Emit(error.to_string()))
+    crate::Parser::validate_no_duplicate_mapping_keys(input).map_err(EmitError::from)
 }

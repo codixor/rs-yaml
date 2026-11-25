@@ -105,6 +105,7 @@ pub struct ByteCursor<'a> {
 }
 
 impl<'a> ByteCursor<'a> {
+    /// Start at the beginning of the original UTF-8 source.
     pub const fn new(source: &'a str) -> Self {
         Self {
             source,

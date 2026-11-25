@@ -77,16 +77,20 @@ fn normalized_complex_keys_cannot_overwrite_each_other_after_merge_expansion() {
 #[test]
 fn duplicate_locations_point_to_keys_and_not_their_values() {
     let error = safe_load("root:\n  sample: first\n  sample: second\n").unwrap_err();
-    assert!(matches!(
-        error,
-        rs_yaml::ParseError::DuplicateKey {
-            first_line: 2,
-            first_column: 3,
-            duplicate_line: 3,
-            duplicate_column: 3,
-            ..
-        }
-    ));
+    let rs_yaml::ParseError::DuplicateKey { first, duplicate } = error else {
+        panic!("{error}")
+    };
+    assert_eq!(
+        (first.0.line.unwrap().get(), first.0.column.unwrap().get()),
+        (2, 3)
+    );
+    assert_eq!(
+        (
+            duplicate.0.line.unwrap().get(),
+            duplicate.0.column.unwrap().get()
+        ),
+        (3, 3)
+    );
 }
 
 #[test]

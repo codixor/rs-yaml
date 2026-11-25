@@ -16,13 +16,13 @@ fn invalid_explicit_tags_return_typed_errors() {
     let error = safe_load("flag: !!bool 'yes'\n").unwrap_err();
     assert!(matches!(
         error,
-        ParseError::InvalidTaggedValue { ref tag, .. } if tag.contains("bool")
+        ParseError::InvalidTaggedValue { tag: "!!bool" }
     ));
 }
 
 #[test]
 fn emit_errors_stay_lightweight() {
-    let error = EmitError::UnsupportedType("complex key not supported".to_owned());
+    let error = EmitError::UnsupportedType("complex key not supported");
     assert_eq!(
         error.to_string(),
         "unsupported type for serialization: complex key not supported"
@@ -34,15 +34,11 @@ fn duplicate_mapping_keys_report_first_and_duplicate_positions() {
     let error = Parser::validate_no_duplicate_mapping_keys("root:\n  title: One\n  title: Two\n")
         .unwrap_err();
 
-    assert!(matches!(
-        error,
-        ParseError::DuplicateKey {
-            ref key,
-            first_line: 2,
-            duplicate_line: 3,
-            ..
-        } if key == "[redacted]"
-    ));
+    let ParseError::DuplicateKey { first, duplicate } = &error else {
+        panic!("{error}")
+    };
+    assert_eq!(first.0.line.unwrap().get(), 2);
+    assert_eq!(duplicate.0.line.unwrap().get(), 3);
     assert!(error.to_string().contains("line 2"));
     assert!(error.to_string().contains("line 3"));
 }
@@ -58,7 +54,7 @@ fn flow_nesting_limit_is_reported_as_a_limit() {
     let input = format!("{}0{}", "[".repeat(256), "]".repeat(256));
     assert!(matches!(
         safe_load(&input),
-        Err(ParseError::ResourceLimit(_))
+        Err(ParseError::ResourceLimit { .. })
     ));
 }
 
@@ -76,7 +72,7 @@ fn upstream_alias_budget_is_reported_as_a_limit() {
         if let Some(error) = loader.error() {
             assert!(matches!(
                 ParseError::from(error.clone()),
-                ParseError::ResourceLimit(_)
+                ParseError::ResourceLimit { .. }
             ));
             return;
         }

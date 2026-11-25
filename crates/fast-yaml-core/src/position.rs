@@ -4,6 +4,8 @@
 //! and the amount a fragment is shifted by is a count ([`LineCount`], [`DocumentCount`]), so the
 //! different numbers cannot be passed in place of one another.
 
+pub use crate::marker::ByteCursor;
+
 use saphyr_parser::Marker;
 use std::fmt;
 use std::num::NonZeroUsize;

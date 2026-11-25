@@ -189,11 +189,11 @@ impl Keys {
                 self.finish(id, *anchor, mark, input)?;
             }
             Event::Alias(anchor) => {
-                let id = self
-                    .anchors
-                    .get(anchor)
-                    .copied()
-                    .ok_or(ParseError::UnresolvedAlias)?;
+                let id = self.anchors.get(anchor).copied().ok_or_else(|| {
+                    ParseError::UnresolvedAlias {
+                        at: Location::marker(input, mark),
+                    }
+                })?;
                 self.finish(Some(id), 0, mark, input)?;
             }
             _ => {}

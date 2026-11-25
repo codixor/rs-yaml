@@ -2,7 +2,8 @@ use crate::load_guard::{self, Documents};
 use crate::{
     Category, EmitError, EmitResult, Limits, ParseError, ParseResult, YAML_LIMITS, error::Location,
 };
-use saphyr_parser::{Event, Marker, Tag};
+use fast_yaml_core::{OneBased, SourcePosition, position::ByteCursor};
+use saphyr_parser::{Event, Tag};
 use serde_core::{Deserialize, Serialize};
 use serde_saphyr::Error as DeError;
 
@@ -47,9 +48,10 @@ pub fn from_str_with_limits<'de, T: Deserialize<'de>>(
             {
                 return Some(Location::at(input, byte));
             }
-            let column = usize::try_from(loc.column()).ok()?.checked_sub(1)?;
-            let line = usize::try_from(loc.line()).ok()?;
-            (line > 0).then(|| Location::marker(input, Marker::new(0, line, column)))
+            let column = OneBased::new(usize::try_from(loc.column()).ok()?)?;
+            let line = OneBased::new(usize::try_from(loc.line()).ok()?)?;
+            let offset = ByteCursor::new(input).offset(SourcePosition::new(line, column));
+            Some(Location::at(input, offset))
         });
         ParseError::Deserialize {
             category,

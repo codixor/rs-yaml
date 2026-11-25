@@ -73,8 +73,8 @@ pub enum ParseError {
         message: &'static str,
     },
     /// An alias requires a completed anchor.
-    #[error("YAML alias must refer to a completed anchor in this document")]
-    UnresolvedAlias,
+    #[error("YAML alias at {at} must refer to a completed anchor in this document")]
+    UnresolvedAlias { at: Location },
     /// A scanner diagnostic with its input text discarded.
     #[error("YAML parse error at {at}: {message}")]
     Syntax {
@@ -114,7 +114,7 @@ impl ParseError {
                 error.info(),
                 "while parsing a node, did not find expected node content"
                     | "while parsing a flow sequence, expected ',' or ']'"
-                    | "while parsing a flow mapping, expected ',' or '}'"
+                    | "while parsing a flow mapping, did not find expected ',' or '}'"
             )
         {
             return Self::Syntax {
@@ -189,6 +189,7 @@ impl FormatError for ParseError {
             #[cfg(feature = "serde")]
             Self::Deserialize { at, .. } => at.map(|a| a.0),
             Self::MultipleDocuments { at }
+            | Self::UnresolvedAlias { at }
             | Self::UnsupportedTag { at }
             | Self::Syntax { at, .. } => Some(at.0),
             Self::DuplicateKey { duplicate, .. } => Some(duplicate.0),

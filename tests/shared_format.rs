@@ -59,6 +59,8 @@ fn encoded_token_body_boundaries() {
         ("''", 0),
         ("{c: ''}", 1),
         ("'éé'", 4),
+        ("\u{feff}abc", 3),
+        ("\u{feff}'éé'", 4),
         ("éé: x", 4),
         ("123456", 6),
         (r#""\u0061""#, 6),
@@ -246,6 +248,90 @@ fn utf8_duplicate_locations_are_absolute_byte_coordinates() {
     );
 }
 
+#[test]
+fn prefix_boms_and_unicode_directives_keep_original_source_coordinates() {
+    for input in [
+        "\u{feff}\u{feff}{é: 1, é: 2}",
+        "first\r\n...\r\n\u{feff}{é: 1, é: 2}",
+        "%é café\n---\n{é: 1, é: 2}",
+    ] {
+        let err = Parser::parse_all(input).unwrap_err();
+        let offset = input.rfind('é').unwrap();
+        let line_start = input[..offset].rfind('\n').map_or(0, |i| i + 1);
+        let at = err.position().unwrap();
+        assert_eq!(at.offset, Some(offset as u64));
+        assert_eq!(at.column.unwrap().get() as usize, offset - line_start + 1);
+    }
+}
+
+#[test]
+fn single_document_entry_points_report_the_second_marker_when_both_documents_fit() {
+    let input = "x\n---\ny\n";
+    let limits = Limits {
+        max_document_bytes: 6,
+        ..YAML_LIMITS
+    };
+    assert_eq!(
+        Parser::parse_all_with_limits(input, &limits).unwrap().len(),
+        2
+    );
+    let errors = [
+        rs_yaml::safe_load_with_limits(input, &limits).unwrap_err(),
+        Parser::parse_marked_str_with_limits(input, &limits).unwrap_err(),
+        #[cfg(feature = "serde")]
+        rs_yaml::from_str_with_limits::<String>(input, &limits).unwrap_err(),
+    ];
+    for error in errors {
+        assert!(matches!(
+            error,
+            rs_yaml::ParseError::MultipleDocuments { .. }
+        ));
+        assert_eq!(error.category(), Category::Data);
+        assert_eq!(error.position().unwrap().offset, Some(2));
+    }
+    let too_long = "longfirst\n---\ny";
+    let error = rs_yaml::safe_load_with_limits(too_long, &limits).unwrap_err();
+    assert_eq!(error.category(), Category::Limit);
+    assert_eq!(error.position().unwrap().offset, Some(6));
+}
+
+#[test]
+fn incomplete_anchor_reports_the_reference_without_its_name() {
+    let input = "&private-fixture-marker [é, *private-fixture-marker]";
+    let err = rs_yaml::safe_load(input).unwrap_err();
+    assert_eq!(err.category(), Category::Data);
+    assert_eq!(
+        err.position().unwrap().offset,
+        Some(input.find('*').unwrap() as u64)
+    );
+    redacted(&err);
+}
+
+#[test]
+#[cfg(feature = "streaming")]
+fn streaming_formatter_preserves_limit_and_merge_diagnostics() {
+    let input = "\u{feff}{é: 1, <<: private-fixture-marker}";
+    let anchors = "- &item x\n".repeat(4097);
+    let config = rs_yaml::EmitterConfig::default();
+    type Formatter = fn(&str, &rs_yaml::EmitterConfig) -> rs_yaml::EmitResult<String>;
+    let formatters: &[Formatter] = &[
+        rs_yaml::streaming::format_streaming,
+        #[cfg(feature = "arena")]
+        rs_yaml::streaming::format_streaming_arena,
+    ];
+    for format in formatters {
+        let err = format(input, &config).unwrap_err();
+        assert_eq!(err.category(), Category::Data);
+        assert_eq!(
+            err.position().unwrap().offset,
+            Some(input.find("<<").unwrap() as u64)
+        );
+        redacted(&err);
+        let error = format(&anchors, &config).unwrap_err();
+        assert_eq!(error.category(), Category::Limit);
+    }
+}
+
 #[cfg(feature = "serde")]
 #[test]
 fn typed_unknown_keys_have_safe_positions_and_errors() {
@@ -270,6 +356,7 @@ fn syntax_eof_and_formatter_diagnostics_discard_backend_text() {
         ("{a: [private-fixture-marker}", Category::Syntax),
         ("'private-fixture-marker", Category::Eof),
         ("[private-fixture-marker", Category::Eof),
+        ("{mode: private-fixture-marker", Category::Eof),
         ("*private-fixture-marker", Category::Data),
         ("!!private-fixture-marker invalid", Category::Data),
         ("<<: private-fixture-marker", Category::Data),

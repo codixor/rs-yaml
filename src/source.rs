@@ -1,26 +1,49 @@
 //! Measure encoded source ranges before handing events to the value loader.
-//! Saphyr's marker columns count Unicode scalars. Its marker index can drift
-//! after a non-ASCII directive; convert line and column against the original text.
+//! The guarded parser's `BufferedInput<Chars>` advances the marker index in
+//! Unicode scalars, including prefix BOMs which do not advance its column.
 use crate::{Limits, ParseError, ParseResult, error::Location};
-use fast_yaml_core::{OneBased, SourcePosition, position::ByteCursor};
 use saphyr_parser::{Event, Marker, ScalarStyle, Span};
 
-fn position(mark: Marker) -> SourcePosition {
-    SourcePosition::new(
-        OneBased::new(mark.line()).unwrap_or(OneBased::FIRST),
-        OneBased::from_index(mark.col()),
-    )
+struct MarkerCursor<'a> {
+    input: &'a str,
+    index: usize,
+    byte: usize,
+}
+
+impl<'a> MarkerCursor<'a> {
+    fn new(input: &'a str) -> Self {
+        Self {
+            input,
+            index: 0,
+            byte: 0,
+        }
+    }
+
+    fn offset(&mut self, mark: Marker) -> usize {
+        let index = mark.index();
+        if index < self.index {
+            self.index = 0;
+            self.byte = 0;
+        }
+        let tail = &self.input[self.byte..];
+        self.byte += tail
+            .char_indices()
+            .nth(index - self.index)
+            .map_or(tail.len(), |(i, _)| i);
+        self.index = index;
+        self.byte
+    }
 }
 
 pub(crate) fn offset(input: &str, mark: Marker) -> usize {
-    ByteCursor::new(input).offset(position(mark))
+    MarkerCursor::new(input).offset(mark)
 }
 
 pub(crate) struct SourceGuard<'a> {
     input: &'a str,
     limits: &'a Limits,
-    starts: ByteCursor<'a>,
-    ends: ByteCursor<'a>,
+    starts: MarkerCursor<'a>,
+    ends: MarkerCursor<'a>,
     scanned: usize,
     document: usize,
     next_document: usize,
@@ -32,8 +55,8 @@ impl<'a> SourceGuard<'a> {
             .then(|| Self {
                 input,
                 limits,
-                starts: ByteCursor::new(input),
-                ends: ByteCursor::new(input),
+                starts: MarkerCursor::new(input),
+                ends: MarkerCursor::new(input),
                 scanned: 0,
                 document: 0,
                 next_document: 0,
@@ -184,7 +207,7 @@ impl<'a> SourceGuard<'a> {
     }
 
     pub(crate) fn observe(&mut self, event: &Event<'_>, span: Span) -> ParseResult<()> {
-        let start = self.starts.offset(position(span.start));
+        let start = self.starts.offset(span.start);
         if matches!(event, Event::DocumentStart(_)) {
             self.document = self.next_document;
         }
@@ -213,7 +236,7 @@ impl<'a> SourceGuard<'a> {
             if matches!(event, Event::Alias(_))
                 || matches!(event, Event::MappingStart(id, tag) | Event::SequenceStart(id, tag) if *id != 0 || tag.is_some())
             {
-                let end = self.ends.offset(position(span.end));
+                let end = self.ends.offset(span.end);
                 self.gap(start, end)?;
                 self.scanned = end;
             }
@@ -221,7 +244,7 @@ impl<'a> SourceGuard<'a> {
         if let Event::Scalar(text, style, _, _) = event
             && (!text.is_empty() || *style != ScalarStyle::Plain)
         {
-            used = self.ends.offset(position(span.end));
+            used = self.ends.offset(span.end);
             if self.input.len() > self.limits.max_token_bytes && start >= self.scanned {
                 self.gap(self.scanned, start)?;
                 self.scalar(start, used, *style)?;

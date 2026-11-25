@@ -99,7 +99,13 @@ impl Budget {
         Ok(())
     }
 
-    fn observe(&mut self, event: &Event<'_>, limits: &Limits) -> ParseResult<()> {
+    fn observe(
+        &mut self,
+        event: &Event<'_>,
+        limits: &Limits,
+        input: &str,
+        span: Span,
+    ) -> ParseResult<()> {
         match event {
             Event::DocumentStart(_) => {
                 self.documents += 1;
@@ -137,11 +143,13 @@ impl Budget {
                 self.finish(*id, node, limits)?;
             }
             Event::Alias(id) => {
-                let node = self
-                    .anchors
-                    .get(id)
-                    .copied()
-                    .ok_or(ParseError::UnresolvedAlias)?;
+                let node =
+                    self.anchors
+                        .get(id)
+                        .copied()
+                        .ok_or_else(|| ParseError::UnresolvedAlias {
+                            at: Location::marker(input, span.start),
+                        })?;
                 self.charge(node.cost)?;
                 self.expand(node.cost, limits)?;
                 self.finish(0, node, limits)?;
@@ -168,15 +176,10 @@ pub(crate) fn load<'a>(
     limits: &Limits,
     mut receive: impl FnMut(Event<'a>, Span) -> ParseResult<()>,
 ) -> ParseResult<()> {
-    let cap = if documents == Documents::Single {
-        limits.max_document_bytes.min(MAX_INPUT_BYTES as u64) as usize
-    } else {
-        MAX_INPUT_BYTES
-    };
-    if input.len() > cap {
+    if input.len() > MAX_INPUT_BYTES {
         return Err(ParseError::ResourceLimit {
             limit: "input bytes",
-            at: Some(Location::at(input, cap)),
+            at: Some(Location::at(input, MAX_INPUT_BYTES)),
         });
     }
     // The scanner uses NUL as its end sentinel. Reject embedded NUL before it can hide a suffix.
@@ -204,7 +207,7 @@ pub(crate) fn load<'a>(
             source.observe(&event, span)?;
         }
         budget
-            .observe(&event, limits)
+            .observe(&event, limits, input, span)
             .map_err(|error| match error {
                 ParseError::ResourceLimit { limit, .. } => ParseError::ResourceLimit {
                     limit,

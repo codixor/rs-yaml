@@ -327,6 +327,13 @@ fn streaming_formatter_preserves_limit_and_merge_diagnostics() {
             Some(input.find("<<").unwrap() as u64)
         );
         redacted(&err);
+        let nonprintable = "\u{feff}\"é\u{7f}\"";
+        let error = format(nonprintable, &config).unwrap_err();
+        assert_eq!(error.category(), Category::Syntax);
+        assert_eq!(
+            error.position().unwrap().offset,
+            Some(nonprintable.find('\u{7f}').unwrap() as u64)
+        );
         let error = format(&anchors, &config).unwrap_err();
         assert_eq!(error.category(), Category::Limit);
     }

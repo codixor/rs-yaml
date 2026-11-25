@@ -10,7 +10,7 @@ use std::ops::Range;
 
 use crate::error::{ParseError, ParseResult, SyntaxError};
 use crate::limits::{DocumentCursor, MaxScanAhead};
-use crate::position::{ByteCursor, OneBased, SourcePosition};
+use crate::position::{OneBased, SourcePosition};
 use crate::scalar::is_c_printable;
 use crate::scan_guard::GuardedParser;
 
@@ -176,7 +176,11 @@ impl<'a> NormalizedInput<'a> {
     /// ```
     #[must_use]
     pub fn original_offset(&self, offset: usize) -> usize {
-        original_offset(&self.removed_at, offset)
+        offset
+            + BOM_LEN
+                * self
+                    .removed_at
+                    .partition_point(|&removed| removed <= offset)
     }
 
     /// Returns the part of this input in `range`, without validating or stripping again.
@@ -211,18 +215,6 @@ impl<'a> NormalizedInput<'a> {
             removed_at: Vec::new(),
         })
     }
-}
-
-fn original_offset(removed_at: &[usize], offset: usize) -> usize {
-    offset + BOM_LEN * removed_at.partition_point(|&removed| removed <= offset)
-}
-
-/// Maps a position in normalized parser text back into the original UTF-8 source.
-/// This also works when input validation failed before returning a `NormalizedInput`.
-#[must_use]
-pub fn original_byte_offset(input: &str, position: SourcePosition) -> usize {
-    let (text, removed_at) = strip_prefix_boms(input);
-    original_offset(&removed_at, ByteCursor::new(&text).offset(position))
 }
 
 const SCAN_CHUNK: usize = 16;

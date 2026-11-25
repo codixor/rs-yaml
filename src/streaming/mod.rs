@@ -2,7 +2,10 @@
 //! The returned string owns the complete output.
 
 use crate::{Category, EmitError, EmitResult, EmitterConfig, ParseError, error::Location};
-use fast_yaml_core::{EmitError as CoreEmitError, ParseError as CoreParseError};
+use fast_yaml_core::{
+    EmitError as CoreEmitError, NormalizedInput, ParseError as CoreParseError, SourcePosition,
+    position::ByteCursor,
+};
 
 /// Format YAML using the guarded heap-based event formatter.
 pub fn format_streaming(input: &str, config: &EmitterConfig) -> EmitResult<String> {
@@ -25,8 +28,7 @@ fn format_error(input: &str, error: CoreEmitError) -> EmitError {
         CoreEmitError::AnchorLimitExceeded { .. } => EmitError::Limit("formatter anchor count"),
         CoreEmitError::TagLimitExceeded { .. } => EmitError::Limit("formatter tag bytes"),
         CoreEmitError::Parse(error) => {
-            let byte = fast_yaml_core::input::original_byte_offset(input, error.position());
-            let at = Location::at(input, byte);
+            let at = format_location(input, error.position());
             let (category, message) = match error {
                 CoreParseError::LimitExceeded { .. } => {
                     return ParseError::ResourceLimit {
@@ -54,6 +56,31 @@ fn format_error(input: &str, error: CoreEmitError) -> EmitError {
         CoreEmitError::SetAsKey => EmitError::UnsupportedType("set used as a key"),
         _ => EmitError::Emit("could not format YAML stream"),
     }
+}
+
+fn format_location(input: &str, position: SourcePosition) -> Location {
+    let offset = |text: &str| ByteCursor::new(text).offset(position);
+    if !input.contains('\u{feff}') {
+        return Location::at(input, offset(input));
+    }
+    if let Ok(normalized) = NormalizedInput::new(input) {
+        return Location::at(
+            input,
+            normalized.original_offset(offset(normalized.as_str())),
+        );
+    }
+    // Normalization failed at the first non-printable character. Its column
+    // excludes stripped prefix BOMs, so the raw column is a lower bound.
+    let start = offset(input);
+    let extra = input[start..]
+        .char_indices()
+        .find_map(|(i, c)| {
+            NormalizedInput::new(c.encode_utf8(&mut [0; 4]))
+                .is_err()
+                .then_some(i)
+        })
+        .unwrap_or(0);
+    Location::at(input, start + extra)
 }
 
 /// Historical heuristic for callers choosing between streaming and DOM processing.

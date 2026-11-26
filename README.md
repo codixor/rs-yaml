@@ -1,23 +1,32 @@
 # rs-yaml
 
-A Rust 1.100 library for parsing, emitting, formatting and linting YAML. The compatibility API re-exports Saphyr 0.4 value and span types. Callers that also name those types through a direct Saphyr dependency should use the 0.4 series. Marked block scalar spans start at the `|` or `>` indicator. The standalone crate also exposes Codixor-maintained forks of the Rust libraries from [fast-yaml](https://github.com/bug-ops/fast-yaml).
+Parse, emit and format YAML in Rust. Use `safe_load` for a single document,
+`safe_load_all` for a multi-document stream, or the optional Serde adapter for
+typed configuration. Version 0.6.0 requires Rust 1.100 or newer.
+[crates.io](https://crates.io/crates/rs-yaml/0.6.0) · [API reference](https://docs.rs/rs-yaml/0.6.0/rs_yaml/)
+
+## Quick start
 
 ```toml
 [dependencies]
 rs-yaml = "0.6.0"
 ```
 
-In 0.6, `ParseError::UnresolvedAlias { at }` carries the location of the alias
-reference. Use `UnresolvedAlias { .. }` to match this error without reading its location.
-
 ```rust
-use rs_yaml::{safe_dump, safe_load};
+use rs_yaml::{safe_dump, safe_load, safe_load_all};
 
-let doc = safe_load("project: rs-yaml\n")?;
-assert_eq!(doc.as_mapping().unwrap().len(), 1);
-assert_eq!(safe_load(&safe_dump(&doc)?)?, doc);
-# Ok::<(), Box<dyn std::error::Error>>(())
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let doc = safe_load("project: rs-yaml\n")?;
+    assert_eq!(safe_load(&safe_dump(&doc)?)?, doc);
+
+    let stream = "---\nproject: api\n---\nproject: worker\n";
+    assert!(safe_load(stream).is_err());
+    assert_eq!(safe_load_all(stream)?.len(), 2);
+    Ok(())
+}
 ```
+
+## Choosing an API
 
 | API | Use |
 | --- | --- |
@@ -31,9 +40,16 @@ assert_eq!(safe_load(&safe_dump(&doc)?)?, doc);
 
 The default `streaming` feature formats parser events directly. Enable `arena` for the arena-backed formatter. Disabling default features selects the legacy DOM formatter. The three facade modules share the Codixor fork types. For example, `parallel::parse_parallel` returns `Vec<fast::Value>`. When migrating from 0.2, import these types through `rs_yaml` or use the matching `codixor-fast-yaml-core`, `codixor-fast-yaml-linter` and `codixor-fast-yaml-parallel` packages. Direct imports from the original fast-yaml packages have different type identities. The compatibility parser uses a separate `rs_yaml::Value` and returns null for an empty stream.
 
+The compatibility API re-exports Saphyr 0.4 value and span types. Use the same 0.4 series for a direct Saphyr dependency. Marked block scalar spans begin at the `|` or `>` indicator. In 0.6, `ParseError::UnresolvedAlias { at }` carries the location of the reference. Match `UnresolvedAlias { .. }` when only its kind matters.
+
 ## Typed configurations
 
-Enable the `serde` feature on `rs-yaml` and the `derive` feature on `serde` to use derived Rust types.
+Enable the typed loader and Serde's derive macros in the consuming crate.
+
+```sh
+cargo add rs-yaml@0.6.0 --features serde
+cargo add serde@1 --features derive
+```
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -90,7 +106,7 @@ The `fast`, `lint` and `parallel` facades expose their upstream policies and dia
 
 Run `bash scripts/validate.sh` or use Cargo directly. CI tests default, minimal and all-feature builds on Rust 1.100, runs Clippy with warnings denied, checks both dependency graphs with cargo-deny and exercises two bounded AddressSanitizer fuzz targets on a pinned nightly. The Criterion suite is available through `bash scripts/bench.sh`.
 
-Imported from [codixor/rust-misc at ae68abb](https://github.com/codixor/rust-misc/tree/ae68abb54c655a8fcc009123fbc31821b82435e4/rs-yaml). The original design incorporates work by the fast-yaml contributors. Both projects use the MIT or Apache-2.0 license at your option.
+Originally developed in the `codixor/rust-misc` workspace at `ae68abb`. The standalone crate also exposes Codixor-maintained forks of the fast-yaml libraries. Both projects use the MIT or Apache-2.0 license at your option. [Upstream fast-yaml](https://github.com/bug-ops/fast-yaml)
 
 ## Releases
 
